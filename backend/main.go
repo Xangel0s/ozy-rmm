@@ -179,6 +179,7 @@ func broadcastToFrontend(agentID string, data []byte) {
 	frontendsMu.Lock()
 	defer frontendsMu.Unlock()
 
+	log.Printf("Broadcasting payload for agent %s to frontend clients", agentID)
 	for id, conn := range frontends {
 		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 			log.Printf("Error sending to frontend %s: %v", id, err)

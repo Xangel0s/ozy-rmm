@@ -255,7 +255,7 @@ func collectTelemetry() TelemetryData {
 	return data
 }
 
-func runBackupSidecar(conn *websocket.Conn, command string) {
+func runBackupSidecar(conn *websocket.Conn, _ string) {
 	// A dummy backup execution engine mapping to Phase 4 sidecar CLI
 	// (Simulates invoking kopia/restic CLI)
 	msg := Message{
