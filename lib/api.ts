@@ -41,6 +41,19 @@ export type TelemetryRow = {
   recordedAt: string
 }
 
+export type BackupJob = {
+  id: number
+  agentId: string
+  name: string
+  location: string
+  type: "full" | "incremental"
+  status: "completed" | "running" | "failed" | "pending"
+  sizeBytes: number
+  cron: string
+  executedAt: string
+  createdAt: string
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function get<T>(path: string): Promise<T> {
@@ -78,5 +91,27 @@ export async function fetchAlerts(): Promise<AlertRow[]> {
     return await get<AlertRow[]>("/api/alerts")
   } catch {
     return []
+  }
+}
+
+/** Returns all backup jobs from the DB. */
+export async function fetchBackups(): Promise<BackupJob[]> {
+  try {
+    return await get<BackupJob[]>("/api/backups")
+  } catch {
+    return []
+  }
+}
+
+/** Triggers a manual backup for the given agentId. */
+export async function runBackup(agentId: string): Promise<void> {
+  try {
+    await fetch(`${BACKEND}/api/backups/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId }),
+    })
+  } catch {
+    // silently ignore
   }
 }

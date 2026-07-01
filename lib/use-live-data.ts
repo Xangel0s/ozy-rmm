@@ -8,9 +8,10 @@
  */
 
 import * as React from "react"
-import { fetchAgents, fetchAlerts, type AgentInfo, type AlertRow } from "@/lib/api"
+import { fetchAgents, fetchAlerts, fetchBackups, type AgentInfo, type AlertRow, type BackupJob } from "@/lib/api"
 
 export type { AlertRow } from "@/lib/api"
+export type { BackupJob } from "@/lib/api"
 
 // ─── useAgents ────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,45 @@ export function useAlerts(intervalMs = 10000) {
   }, [intervalMs])
 
   return { alerts, loading, error }
+}
+
+// ─── useBackups ───────────────────────────────────────────────────────────────
+
+/**
+ * Polls /api/backups every `intervalMs` ms (default 15 s).
+ * Returns { backups, loading, error }.
+ */
+export function useBackups(intervalMs = 15000) {
+  const [backups, setBackups] = React.useState<BackupJob[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      try {
+        const data = await fetchBackups()
+        if (!cancelled) {
+          setBackups(data ?? [])
+          setError(null)
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    load()
+    const id = setInterval(load, intervalMs)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [intervalMs])
+
+  return { backups, loading, error }
 }
 
 // ─── agentToDevice ────────────────────────────────────────────────────────────

@@ -6,12 +6,21 @@ import { ConsoleShell } from "@/components/rmm/console-shell"
 import { DeviceTable } from "@/components/rmm/device-table"
 import { KpiCards } from "@/components/rmm/kpi-cards"
 import { Card } from "@/components/ui/card"
-import { devices as allDevices, tenants } from "@/lib/rmm-data"
+import { devices as mockDevices, tenants } from "@/lib/rmm-data"
+import { useAgents, agentToDevice } from "@/lib/use-live-data"
 
 export default function DevicesPage() {
   const [tenant, setTenant] = React.useState("all")
   const [query, setQuery] = React.useState("")
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
+
+  // Live data from the Go backend — falls back to mock devices when backend is offline
+  const { agents } = useAgents(5000)
+  const liveDevices = React.useMemo(
+    () => (agents.length > 0 ? agents.map(agentToDevice) : []),
+    [agents]
+  )
+  const allDevices = liveDevices.length > 0 ? liveDevices : mockDevices
 
   const tenantName = tenants.find((t) => t.id === tenant)?.name
 
@@ -26,7 +35,7 @@ export default function DevicesPage() {
         d.tenant.toLowerCase().includes(q)
       return matchTenant && matchQuery
     })
-  }, [tenant, tenantName, query])
+  }, [tenant, tenantName, query, allDevices])
 
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -59,7 +68,7 @@ export default function DevicesPage() {
       selectedCount={selected.size}
       onRunScript={runScript}
       title="Monitored Devices"
-      subtitle={`${filtered.length} visible endpoints`}
+      subtitle={`${filtered.length} visible endpoint${filtered.length === 1 ? "" : "s"}`}
     >
       <KpiCards devices={filtered} />
 

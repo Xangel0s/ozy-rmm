@@ -55,7 +55,20 @@ type AgentInfo struct {
 	LastSeen  string  `json:"lastSeen"`
 }
 
-// AlertRow is the shape returned by /api/alerts.
+// BackupJob is the shape returned by /api/backups.
+type BackupJob struct {
+	ID         int64  `json:"id"`
+	AgentID    string `json:"agentId"`
+	Name       string `json:"name"`
+	Location   string `json:"location"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	Cron       string `json:"cron"`
+	ExecutedAt string `json:"executedAt"`
+	CreatedAt  string `json:"createdAt"`
+}
+
 type AlertRow struct {
 	ID       int64  `json:"id"`
 	AgentID  string `json:"agentId"`
@@ -130,6 +143,19 @@ func initDB() {
 		message    TEXT,
 		created_at TEXT
 	);
+
+	CREATE TABLE IF NOT EXISTS backup_jobs (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent_id   TEXT,
+		name       TEXT,
+		location   TEXT,
+		type       TEXT DEFAULT 'full',
+		status     TEXT DEFAULT 'pending',
+		size_bytes INTEGER DEFAULT 0,
+		cron       TEXT DEFAULT '0 2 * * *',
+		executed_at TEXT,
+		created_at TEXT
+	);
 	`
 
 	if _, err := db.Exec(schema); err != nil {
@@ -152,7 +178,10 @@ func upsertAgent(id string) {
 	if err != nil {
 		log.Printf("upsertAgent error: %v", err)
 	}
+	// Ensure each agent has at least a default backup policy seeded
+	seedBackupJob(id)
 }
+
 
 // markAgentOffline sets status=offline for an agent.
 func markAgentOffline(id string) {
@@ -214,6 +243,87 @@ func saveAlert(agentID, severity, message string) {
 	if err != nil {
 		log.Printf("saveAlert error: %v", err)
 	}
+}
+
+// seedBackupJob ensures the agent has at least one backup job entry in the DB.
+// This represents the default system backup policy applied to every agent.
+func seedBackupJob(agentID string) {
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM backup_jobs WHERE agent_id = ?`, agentID).Scan(&count)
+	if count > 0 {
+		return // already seeded
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	jobs := []struct {
+		name, location, typ, cron string
+	}{
+		{"Nightly-System", "/backups/system", "full", "0 2 * * *"},
+		{"Hourly-Delta", "/backups/delta", "incremental", "0 * * * *"},
+	}
+	for _, j := range jobs {
+		_, err := db.Exec(`
+			INSERT INTO backup_jobs (agent_id, name, location, type, status, cron, created_at)
+			VALUES (?, ?, ?, ?, 'completed', ?, ?)
+		`, agentID, j.name, j.location, j.typ, j.cron, now)
+		if err != nil {
+			log.Printf("seedBackupJob error: %v", err)
+		}
+	}
+}
+
+// handleListBackups returns all backup jobs from the DB.
+func handleListBackups(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query(`
+		SELECT id, agent_id, COALESCE(name,''), COALESCE(location,''), type, status,
+		       size_bytes, cron, COALESCE(executed_at,''), COALESCE(created_at,'')
+		FROM backup_jobs
+		ORDER BY id DESC
+	`)
+	if err != nil {
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	list := []BackupJob{}
+	for rows.Next() {
+		var b BackupJob
+		if err := rows.Scan(&b.ID, &b.AgentID, &b.Name, &b.Location, &b.Type, &b.Status,
+			&b.SizeBytes, &b.Cron, &b.ExecutedAt, &b.CreatedAt); err != nil {
+			continue
+		}
+		list = append(list, b)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+// handleRunBackup marks a specific backup job as 'running'.
+func handleRunBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AgentID string `json:"agentId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AgentID == "" {
+		http.Error(w, "missing agentId", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(`
+		INSERT INTO backup_jobs (agent_id, name, location, type, status, cron, executed_at, created_at)
+		VALUES (?, 'Manual-Backup', '/backups/manual', 'full', 'running', '@manual', ?, ?)
+	`, req.AgentID, now, now)
+	if err != nil {
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
+	saveAlert(req.AgentID, "info", "Manual backup job started")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"queued"}`))
 }
 
 // ─── HTTP Handlers ────────────────────────────────────────────────────────────
@@ -472,6 +582,8 @@ func main() {
 	http.HandleFunc("/api/agents", corsMiddleware(handleListAgents))
 	http.HandleFunc("/api/agents/telemetry", corsMiddleware(handleAgentTelemetry))
 	http.HandleFunc("/api/alerts", corsMiddleware(handleListAlerts))
+	http.HandleFunc("/api/backups", corsMiddleware(handleListBackups))
+	http.HandleFunc("/api/backups/run", corsMiddleware(handleRunBackup))
 	http.HandleFunc("/terminal/ws", handleTerminalWebSocket)
 
 	port := ":8080"
