@@ -234,6 +234,19 @@ func saveTelemetry(agentID string, t TelemetryPayload) {
 	}
 }
 
+// saveTelemetryHistory persists historical telemetry data with its original timestamp.
+func saveTelemetryHistory(agentID string, t TelemetryPayload, timestamp string) {
+	// Append a history row with original timestamp
+	_, err := db.Exec(`
+		INSERT INTO telemetry (agent_id, cpu_load, total_ram, free_ram, disk_total, disk_free, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, agentID, t.CPULoad, t.TotalRAM, t.FreeRAM, t.DiskTotal, t.DiskFree, timestamp)
+	if err != nil {
+		log.Printf("saveTelemetryHistory insert telemetry error: %v", err)
+	}
+}
+
+
 // saveAlert writes an alert row to the database.
 func saveAlert(agentID, severity, message string) {
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -392,6 +405,26 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			saveTelemetry(agentID, t)
+			broadcastToFrontend(agentID, msgBytes)
+
+		case "telemetry_history":
+			type HistoricalPayload struct {
+				Payload   string `json:"payload"`
+				CreatedAt string `json:"createdAt"`
+			}
+			var history []HistoricalPayload
+			if err := json.Unmarshal([]byte(msg.Payload), &history); err != nil {
+				log.Printf("Failed to parse telemetry_history: %v", err)
+				continue
+			}
+			log.Printf("Processing %d historical telemetry logs from agent %s", len(history), agentID)
+			for _, entry := range history {
+				var t TelemetryPayload
+				if err := json.Unmarshal([]byte(entry.Payload), &t); err == nil {
+					saveTelemetryHistory(agentID, t, entry.CreatedAt)
+				}
+			}
+			// Broadcast the latest state (if any) or trigger a silent refresh
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "terminal_output":

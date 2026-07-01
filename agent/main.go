@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/url"
@@ -11,8 +10,11 @@ import (
 	"runtime"
 	"time"
 
+	"database/sql"
 	"github.com/gorilla/websocket"
 	"github.com/yusufpapurcu/wmi"
+	"golang.org/x/sys/windows/svc"
+	_ "modernc.org/sqlite"
 )
 
 type Message struct {
@@ -52,29 +54,218 @@ type Win32_LogicalDisk struct {
 var agentID = "windows-client-dev"
 var backendAddr = "localhost:8080"
 
-func main() {
-	hostname, _ := os.Hostname()
-	log.Printf("Starting agent on %s (%s)", hostname, runtime.GOOS)
+type agentService struct{}
 
-	// Keep trying to connect to the backend WebSocket server
+func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
+	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
+	changes <- svc.Status{State: svc.StartPending}
+	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
+
+	// Channel to signal shutdown to the main connection loop
+	shutdownChan := make(chan struct{})
+
+	go func() {
+		runAgentLoop(shutdownChan)
+	}()
+
 	for {
+		select {
+		case c := <-r:
+			switch c.Cmd {
+			case svc.Interrogate:
+				changes <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				changes <- svc.Status{State: svc.StopPending}
+				close(shutdownChan)
+				return
+			default:
+				log.Printf("Unexpected control request: %d", c.Cmd)
+			}
+		}
+	}
+}
+
+var localDB *sql.DB
+
+func initLocalDB() {
+	dbDir := "C:\\ProgramData\\OzyShield"
+	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+		dbDir = "."
+	}
+	dbPath := dbDir + "\\queue.db"
+
+	var err error
+	localDB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		log.Fatalf("Failed to open local SQLite: %v", err)
+	}
+
+	schema := `
+	CREATE TABLE IF NOT EXISTS pending_telemetry (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		payload    TEXT,
+		created_at TEXT
+	);`
+	if _, err := localDB.Exec(schema); err != nil {
+		log.Fatalf("Failed to create local schema: %v", err)
+	}
+	log.Printf("Local SQLite queue initialized at %s", dbPath)
+}
+
+func queueTelemetryOffline(payload string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := localDB.Exec(`INSERT INTO pending_telemetry (payload, created_at) VALUES (?, ?)`, payload, now)
+	if err != nil {
+		log.Printf("Failed to queue telemetry offline: %v", err)
+	} else {
+		log.Println("WS offline. Telemetry queued locally in SQLite.")
+	}
+}
+
+func flushOfflineTelemetry(conn *websocket.Conn) {
+	rows, err := localDB.Query(`SELECT id, payload, created_at FROM pending_telemetry ORDER BY id ASC`)
+	if err != nil {
+		log.Printf("Failed to read local queue: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	type HistoricalPayload struct {
+		Payload   string `json:"payload"`
+		CreatedAt string `json:"createdAt"`
+	}
+
+	var flushedIDs []int64
+	var history []HistoricalPayload
+
+	for rows.Next() {
+		var id int64
+		var payload, createdAt string
+		if err := rows.Scan(&id, &payload, &createdAt); err == nil {
+			flushedIDs = append(flushedIDs, id)
+			history = append(history, HistoricalPayload{
+				Payload:   payload,
+				CreatedAt: createdAt,
+			})
+		}
+	}
+
+	if len(history) == 0 {
+		return
+	}
+
+	log.Printf("Flushing %d offline telemetry records to backend...", len(history))
+	payloadBytes, _ := json.Marshal(history)
+	msg := Message{
+		AgentID: agentID,
+		Type:    "telemetry_history",
+		Payload: string(payloadBytes),
+	}
+	msgBytes, _ := json.Marshal(msg)
+	err = conn.WriteMessage(websocket.TextMessage, msgBytes)
+	if err != nil {
+		log.Printf("Failed to send offline telemetry flush: %v", err)
+		return
+	}
+
+	// Clean up successfully sent records
+	for _, id := range flushedIDs {
+		_, _ = localDB.Exec(`DELETE FROM pending_telemetry WHERE id = ?`, id)
+	}
+	log.Println("Offline telemetry flush completed and local cache cleared.")
+}
+
+func main() {
+	// Load configuration from env vars if present
+	if envID := os.Getenv("AGENT_ID"); envID != "" {
+		agentID = envID
+	}
+	if envBackend := os.Getenv("BACKEND_URL"); envBackend != "" {
+		backendAddr = envBackend
+	}
+
+	hostname, _ := os.Hostname()
+	log.Printf("Starting agent on %s (%s) [ID: %s, Backend: %s]", hostname, runtime.GOOS, agentID, backendAddr)
+
+	initLocalDB()
+
+	isService, err := svc.IsWindowsService()
+	if err != nil {
+		log.Fatalf("Failed to determine if running as service: %v", err)
+	}
+
+	if isService {
+		err = svc.Run("OzyShieldAgent", &agentService{})
+		if err != nil {
+			log.Fatalf("Service execution failed: %v", err)
+		}
+	} else {
+		// Run interactively in the foreground
+		runAgentLoop(nil)
+	}
+}
+
+func runAgentLoop(shutdownChan chan struct{}) {
+	for {
+		select {
+		case <-shutdownChan:
+			log.Println("Received shutdown signal. Stopping connection loop.")
+			return
+		default:
+		}
+
 		u := url.URL{Scheme: "ws", Host: backendAddr, Path: "/agent/connect", RawQuery: "id=" + agentID}
 		log.Printf("Connecting to %s", u.String())
 
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {
 			log.Printf("Dial failed: %v. Retrying in 5 seconds...", err)
-			time.Sleep(5 * time.Second)
-			continue
+			
+			// Queue telemetry locally if we are disconnected and try to collect
+			data := collectTelemetry()
+			payloadBytes, _ := json.Marshal(data)
+			queueTelemetryOffline(string(payloadBytes))
+
+			select {
+			case <-shutdownChan:
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
 		}
 
 		log.Println("Connected to Backend successfully.")
-		handleConnection(conn)
-		conn.Close()
+		
+		// Flush any local backup of metrics
+		flushOfflineTelemetry(conn)
+
+		// Run handleConnection inside a helper that handles early cancellation
+		connDone := make(chan struct{})
+		go func() {
+			handleConnection(conn)
+			close(connDone)
+		}()
+
+		select {
+		case <-shutdownChan:
+			log.Println("Shutdown signal received while connected. Closing connection...")
+			conn.Close()
+			<-connDone
+			return
+		case <-connDone:
+			conn.Close()
+		}
+
 		log.Println("Disconnected from Backend. Retrying in 5 seconds...")
-		time.Sleep(5 * time.Second)
+		select {
+		case <-shutdownChan:
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
+
+
 
 func handleConnection(conn *websocket.Conn) {
 	// Goroutine for periodic telemetry (every 10 seconds)
@@ -93,7 +284,11 @@ func handleConnection(conn *websocket.Conn) {
 					Payload: string(payloadBytes),
 				}
 				msgBytes, _ := json.Marshal(msg)
-				_ = conn.WriteMessage(websocket.TextMessage, msgBytes)
+				err := conn.WriteMessage(websocket.TextMessage, msgBytes)
+				if err != nil {
+					log.Printf("WS write failed: %v. Storing offline...", err)
+					queueTelemetryOffline(string(payloadBytes))
+				}
 			case <-stopTelemetry:
 				return
 			}
@@ -255,34 +450,46 @@ func collectTelemetry() TelemetryData {
 	return data
 }
 
-func runBackupSidecar(conn *websocket.Conn, _ string) {
-	// A dummy backup execution engine mapping to Phase 4 sidecar CLI
-	// (Simulates invoking kopia/restic CLI)
+func runBackupSidecar(conn *websocket.Conn, payload string) {
+	// Send initial status back
+	sendWSMsg(conn, "backup_status", "Initializing Kopia sidecar backup...")
+
+	// Verify if kopia.exe is installed (e.g. C:\ProgramData\OzyShield\kopia.exe)
+	// If not found, simulate downloading Kopia silently.
+	kopiaPath := "C:\\ProgramData\\OzyShield\\kopia.exe"
+	if _, err := os.Stat(kopiaPath); os.IsNotExist(err) {
+		sendWSMsg(conn, "backup_status", "Kopia binary not found. Downloading Kopia silently...")
+		time.Sleep(2 * time.Second) // Simulate download delay
+		sendWSMsg(conn, "backup_status", "Kopia engine initialized successfully.")
+	}
+
+	sendWSMsg(conn, "backup_status", "Connecting to secure repository backup destination...")
+	time.Sleep(1 * time.Second)
+
+	// Simulate/run snapshotting
+	steps := []string{
+		"Scanning directory targets...",
+		"Uploading data blocks: 15% complete",
+		"Uploading data blocks: 45% complete",
+		"Uploading data blocks: 80% complete",
+		"Hashing and finalizing backup snapshot...",
+	}
+
+	for _, step := range steps {
+		time.Sleep(1 * time.Second)
+		sendWSMsg(conn, "backup_status", step)
+	}
+
+	sendWSMsg(conn, "backup_status", "Backup complete. Snapshot hash created: rmm_kopia_5df82c91a0b3")
+}
+
+func sendWSMsg(conn *websocket.Conn, msgType, payload string) {
 	msg := Message{
 		AgentID: agentID,
-		Type:    "backup_status",
-		Payload: "Initializing backup snapshot (using sidecar)...",
+		Type:    msgType,
+		Payload: payload,
 	}
 	msgBytes, _ := json.Marshal(msg)
 	_ = conn.WriteMessage(websocket.TextMessage, msgBytes)
-
-	// Simulate steps
-	for pct := 10; pct <= 100; pct += 30 {
-		time.Sleep(1 * time.Second)
-		statusMsg := Message{
-			AgentID: agentID,
-			Type:    "backup_status",
-			Payload: fmt.Sprintf("Processing block storage backup: %d%%", pct),
-		}
-		statusBytes, _ := json.Marshal(statusMsg)
-		_ = conn.WriteMessage(websocket.TextMessage, statusBytes)
-	}
-
-	completeMsg := Message{
-		AgentID: agentID,
-		Type:    "backup_status",
-		Payload: "Backup complete. Snapshot hash created: rmm_restic_73a21bc9",
-	}
-	completeBytes, _ := json.Marshal(completeMsg)
-	_ = conn.WriteMessage(websocket.TextMessage, completeBytes)
 }
+
