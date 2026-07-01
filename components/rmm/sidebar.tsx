@@ -19,7 +19,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { alerts, deviceBackups, devices, tenants } from "@/lib/rmm-data"
+import { tenants } from "@/lib/rmm-data"
+import { useAgents, useAlerts, useBackups } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
 
 const nav = [
@@ -39,14 +40,21 @@ export function Sidebar({
   onTenantChange: (value: string) => void
 }) {
   const pathname = usePathname()
-  const criticalAlerts = alerts.filter((a) => a.severity === "critical").length
-  const runningBackups = deviceBackups.filter((b) => b.status === "running").length
 
-  const resolveBadge = (badge: string | null) => {
+  // Live counts from the backend — these replace the static mock values
+  const { agents } = useAgents(5000)
+  const { alerts: liveAlerts } = useAlerts(10000)
+  const { backups: liveBackups } = useBackups(15000)
+
+  const criticalAlerts = liveAlerts.filter((a) => a.severity === "critical").length
+  const runningBackups = liveBackups.filter((b) => b.status === "running").length
+  const deviceCount = agents.length
+
+  const resolveBadge = (badge: string | null): string | null => {
     if (!badge) return null
-    if (badge === "devices") return String(devices.length)
-    if (badge === "alerts") return String(criticalAlerts)
-    if (badge === "backups") return String(runningBackups)
+    if (badge === "devices") return deviceCount > 0 ? String(deviceCount) : null
+    if (badge === "alerts") return criticalAlerts > 0 ? String(criticalAlerts) : null
+    if (badge === "backups") return runningBackups > 0 ? String(runningBackups) : null
     return badge
   }
 

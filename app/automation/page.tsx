@@ -8,7 +8,8 @@ import { DeviceTable } from "@/components/rmm/device-table"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { devices as allDevices, scripts, tenants } from "@/lib/rmm-data"
+import { devices as mockDevices, scripts, tenants } from "@/lib/rmm-data"
+import { useAgents, agentToDevice } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
 
 export default function AutomationPage() {
@@ -16,6 +17,14 @@ export default function AutomationPage() {
   const [query, setQuery] = React.useState("")
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [activeScript, setActiveScript] = React.useState(scripts[0])
+
+  // Live data — fall back to mocks when backend is offline
+  const { agents } = useAgents(5000)
+  const liveDevices = React.useMemo(
+    () => (agents.length > 0 ? agents.map(agentToDevice) : []),
+    [agents]
+  )
+  const allDevices = liveDevices.length > 0 ? liveDevices : mockDevices
 
   const tenantName = tenants.find((t) => t.id === tenant)?.name
 
@@ -30,7 +39,7 @@ export default function AutomationPage() {
         d.tenant.toLowerCase().includes(q)
       return matchTenant && matchQuery
     })
-  }, [tenant, tenantName, query])
+  }, [tenant, tenantName, query, allDevices])
 
   const toggle = (id: string) =>
     setSelected((prev) => {
