@@ -3,6 +3,9 @@
 import * as React from "react"
 import { toast } from "sonner"
 
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8080"
+const WS_BACKEND = BACKEND.replace(/^http/, "ws")
+
 export function useRealTimeNotifications() {
   React.useEffect(() => {
     let ws: WebSocket | null = null
@@ -12,8 +15,7 @@ export function useRealTimeNotifications() {
       const token = typeof window !== "undefined" ? localStorage.getItem("token") : ""
       if (!token) return
 
-      // Connect to event hub socket on backend
-      const wsUrl = `ws://localhost:8080/api/events/ws?token=${encodeURIComponent(token)}`
+      const wsUrl = `${WS_BACKEND}/api/events/ws?token=${encodeURIComponent(token)}`
       ws = new WebSocket(wsUrl)
 
       ws.onopen = () => {
@@ -23,10 +25,9 @@ export function useRealTimeNotifications() {
       ws.onmessage = (event) => {
         try {
           const alert = JSON.parse(event.data)
-          // Trigger dynamic Sonner toast notification
           if (alert.type === "critical") {
             toast.error(`CRITICAL: ${alert.message}`, {
-              description: `Agent: ${alert.agentId} | Click to open incident details.`,
+              description: `Agent: ${alert.agentId}`,
               duration: 8000,
             })
           } else if (alert.type === "warning") {

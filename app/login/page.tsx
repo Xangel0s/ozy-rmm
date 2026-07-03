@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Activity, Lock, User } from "lucide-react"
+import { Activity, Lock, Mail } from "lucide-react"
 import { toast } from "sonner"
 import { authenticate } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -10,28 +10,28 @@ import { Input } from "@/components/ui/input"
 import { Card } from "@/components/ui/card"
 
 export default function LoginPage() {
-  const [username, setUsername] = React.useState("")
+  const [email, setEmail] = React.useState("")
   const [password, setPassword] = React.useState("")
   const [loading, setLoading] = React.useState(false)
   const router = useRouter()
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!username || !password) {
-      toast.error("Complete todos los campos")
+    if (!email || !password) {
+      toast.error("Please fill in all fields")
       return
     }
 
     setLoading(true)
-    const success = await authenticate(username, password)
+    const success = await authenticate(email, password)
     setLoading(false)
 
     if (success) {
-      toast.success("Welcome back, administrator.")
+      toast.success("Welcome back!")
       router.push("/")
     } else {
-      toast.error("Credenciales inválidas", {
-        description: "El nombre de usuario o la contraseña son incorrectos.",
+      toast.error("Invalid credentials", {
+        description: "The email or password is incorrect.",
       })
     }
   }
@@ -51,15 +51,15 @@ export default function LoginPage() {
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold uppercase tracking-wider text-stone-400">
-                User profile
+                Email Address
               </label>
               <div className="relative">
-                <User className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-500" />
+                <Mail className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-500" />
                 <Input
-                  type="text"
-                  placeholder="admin"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  type="email"
+                  placeholder="admin@apexrmm.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   className="bg-stone-950/50 pl-10 border-stone-800 text-stone-100 placeholder:text-stone-600 focus:border-primary focus:ring-primary/20"
                 />
               </div>
@@ -67,7 +67,7 @@ export default function LoginPage() {
 
             <div className="flex flex-col gap-1.5">
               <label className="text-xs font-semibold uppercase tracking-wider text-stone-400">
-                Access Code / Password
+                Password
               </label>
               <div className="relative">
                 <Lock className="absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-500" />
@@ -86,7 +86,7 @@ export default function LoginPage() {
               disabled={loading}
               className="mt-2 w-full bg-primary hover:bg-primary/95 text-primary-foreground"
             >
-              {loading ? "Authorizing..." : "Authenticate Session"}
+              {loading ? "Authorizing..." : "Sign In"}
             </Button>
           </form>
         </Card>

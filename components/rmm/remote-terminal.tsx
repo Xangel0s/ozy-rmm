@@ -53,6 +53,9 @@ export function RemoteTerminal({ agentId }: RemoteTerminalProps) {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data)
+        if (msg.agentId && msg.agentId !== agentId) {
+          return
+        }
         if (msg.type === "terminal_output") {
           term.write(msg.payload)
         }

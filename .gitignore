@@ -16,5 +16,11 @@ node_modules
 
 # Go build outputs
 *.exe
+*.exe~
 backend/backend
 agent/agent
+
+# Temp files
+*.tmp
+*.tmp2
+tsconfig.tsbuildinfo

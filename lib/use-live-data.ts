@@ -157,7 +157,7 @@ export function agentToDevice(a: AgentInfo): Device {
     id: a.id,
     name: a.hostname || a.id,
     os: guessOs(a.os),
-    tenant: "Live Agent",          // Real multi-tenancy to be added in a future phase
+    tenant: a.tenantId || "Unknown",
     status: a.status === "online" ? "online" : "offline",
     cpu: Math.round(a.cpuLoad),
     ram: ramPct,
@@ -165,13 +165,28 @@ export function agentToDevice(a: AgentInfo): Device {
     cpuTrend: [],
     ramTrend: [],
     diskTrend: [],
-    ip: a.id,
+    ip: a.localIP || a.id,
     lastSeen: a.lastSeen
       ? new Date(a.lastSeen).toLocaleTimeString()
       : "unknown",
     lastSync: a.lastSeen
       ? relativeTime(new Date(a.lastSeen))
       : "unknown",
+    vendor: a.vendor,
+    model: a.model,
+    serialNumber: a.serialNumber,
+    uptime: a.uptime,
+    kernelVersion: a.kernelVersion,
+    agentVersion: a.agentVersion,
+    localIP: a.localIP,
+    macAddress: a.macAddress,
+    gateway: a.gateway,
+    numCPU: a.numCPU,
+    cpuModel: a.cpuModel,
+    totalRam: a.totalRam,
+    freeRam: a.freeRam,
+    diskTotal: a.diskTotal,
+    diskFree: a.diskFree,
   }
 }
 

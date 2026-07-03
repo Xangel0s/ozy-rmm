@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+.env
+.env.local
+backend/rmm.db
+backend/*.exe
+agent/*.exe
+*.exe~

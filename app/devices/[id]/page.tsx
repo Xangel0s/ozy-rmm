@@ -8,34 +8,83 @@ import {
   Cpu,
   HardDrive,
   MemoryStick,
-  Monitor,
-  ShieldAlert,
   TerminalSquare,
+  Clock,
+  Server,
+  Layers,
+  Package,
+  StickyNote,
+  Boxes,
+  Bug,
+  Shield,
+  Puzzle,
+  Activity,
 } from "lucide-react"
 import { toast } from "sonner"
 import { ConsoleShell } from "@/components/rmm/console-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { alerts as mockAlerts, deviceBackups, devices as mockDevices, osLabels } from "@/lib/rmm-data"
-import { useAgents, agentToDevice, useAlerts } from "@/lib/use-live-data"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
+import { useAgents } from "@/lib/use-live-data"
 import { RemoteTerminal } from "@/components/rmm/remote-terminal"
+import { SummaryTab } from "./summary-tab"
+import { SoftwareTab } from "./software-tab"
+import { NotesTab } from "./notes-tab"
+import { AssetsTab } from "./assets-tab"
+import { DebugTab } from "./debug-tab"
+import { AuditTab } from "./audit-tab"
+import { PatchesTab } from "./patches-tab"
+import { ChecksTab } from "./checks-tab"
+import type { DeviceSummary } from "./types"
 
 export default function DeviceDetailPage() {
   const [tenant, setTenant] = React.useState("all")
   const [query, setQuery] = React.useState("")
   const [showTerminal, setShowTerminal] = React.useState(false)
-  
+  const [activeTab, setActiveTab] = React.useState("summary")
+
   const params = useParams<{ id: string }>()
   const id = params?.id
 
-  // Load live agent data
   const { agents } = useAgents(5000)
-  const { alerts: liveAlerts } = useAlerts(10000)
 
-  const liveDevices = React.useMemo(() => agents.map(agentToDevice), [agents])
-  const allDevices = liveDevices.length > 0 ? liveDevices : mockDevices
-  const device = allDevices.find((item) => item.id === id)
+  const device = React.useMemo((): DeviceSummary | null => {
+    const agent = agents.find((a) => a.id === id)
+    if (!agent) return null
+    return {
+      id: agent.id,
+      hostname: agent.hostname,
+      status: agent.status === "online" ? "online" : "offline",
+      lastSeen: agent.lastSeen || "",
+      os: agent.os || "",
+      kernelVersion: agent.kernelVersion || "",
+      agentVersion: agent.agentVersion || "",
+      uptime: agent.uptime || "",
+      cpuModel: agent.cpuModel || "",
+      numCPU: agent.numCPU || 0,
+      cpuLoad: agent.cpuLoad || 0,
+      totalRAM: agent.totalRam || 0,
+      freeRam: agent.freeRam || 0,
+      gpuName: agent.gpuName || "",
+      gpuDriver: agent.gpuDriver || "",
+      vendor: agent.vendor || "",
+      model: agent.model || "",
+      serialNumber: agent.serialNumber || "",
+      localIP: agent.localIP || "",
+      macAddress: agent.macAddress || "",
+      gateway: agent.gateway || "",
+      disks: (agent.disks || []).map((d) => ({
+        deviceID: d.deviceID,
+        size: d.size,
+        freeSpace: d.freeSpace,
+        label: d.label || d.deviceID,
+        filesystem: d.filesystem || "",
+      })),
+      recentAlerts: [],
+      recentBackups: [],
+    }
+  }, [agents, id])
 
   if (!device) {
     return (
@@ -62,19 +111,9 @@ export default function DeviceDetailPage() {
     )
   }
 
-  // Filter alerts & backups
-  const allAlerts = liveAlerts.length > 0 
-    ? liveAlerts.map(a => ({
-        id: String(a.id),
-        device: a.agentId,
-        message: a.message,
-        severity: a.severity,
-        time: a.time ? new Date(a.time).toLocaleString() : ""
-      }))
-    : mockAlerts
-
-  const relatedAlerts = allAlerts.filter((alert) => alert.device === device.name || alert.device === device.id)
-  const backups = deviceBackups.filter((backup) => backup.deviceId === device.id)
+  const ramUsed = device.totalRAM > 0
+    ? Math.round(((device.totalRAM - device.freeRam) / device.totalRAM) * 100)
+    : 0
 
   return (
     <ConsoleShell
@@ -82,9 +121,10 @@ export default function DeviceDetailPage() {
       onTenantChange={setTenant}
       query={query}
       onQueryChange={setQuery}
-      title={device.name}
-      subtitle={`${device.tenant} - ${device.ip}`}
+      title={device.hostname}
+      subtitle={`${device.vendor && device.model ? `${device.vendor} ${device.model}` : device.os} - ${device.localIP || "No IP"}`}
     >
+      {/* Header Actions */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Link href="/devices" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-4" />
@@ -97,162 +137,120 @@ export default function DeviceDetailPage() {
             onClick={() => {
               setShowTerminal((prev) => !prev)
               if (!showTerminal) {
-                toast.success(`Opening terminal session for ${device.name}`, {
+                toast.success(`Opening terminal session for ${device.hostname}`, {
                   description: "Connecting interactive shell connection.",
                 })
               }
             }}
           >
-            <TerminalSquare data-icon="inline-start" />
+            <TerminalSquare className="size-4" />
             {showTerminal ? "Close Terminal" : "Terminal"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              toast.success(`Remote control requested for ${device.name}`, {
-                description: "Operator session will open after endpoint confirmation.",
-              })
-            }
-          >
-            <Monitor data-icon="inline-start" />
-            Remote Control
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              toast.success(`Collect Diagnostics queued for ${device.name}`, {
-                description: "Execution will start on the next heartbeat.",
-              })
-            }
-          >
-            <TerminalSquare data-icon="inline-start" />
-            Run Diagnostics
           </Button>
         </div>
       </div>
 
+      {/* Terminal */}
       {showTerminal && (
         <div className="my-2">
           <RemoteTerminal agentId={device.id} />
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {/* Resource Cards */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+        <Card className="gap-1 p-4">
+          <span className="text-xs text-muted-foreground">Status</span>
+          <Badge variant={device.status === "online" ? "default" : "secondary"} className="w-fit capitalize">
+            {device.status}
+          </Badge>
+          <span className="text-xs text-muted-foreground">{device.lastSeen ? `Last seen ${device.lastSeen}` : "Unknown"}</span>
+        </Card>
         <Card className="gap-1 p-4">
           <span className="text-xs text-muted-foreground">CPU</span>
-          <span className="text-2xl font-semibold tabular-nums">{device.cpu}%</span>
-          <span className="text-xs text-muted-foreground">Current utilization</span>
+          <span className="text-2xl font-semibold tabular-nums">{device.cpuLoad}%</span>
+          <span className="text-xs text-muted-foreground truncate">{device.cpuModel || "Utilization"}</span>
           <Cpu className="mt-2 size-4 text-muted-foreground" />
         </Card>
         <Card className="gap-1 p-4">
           <span className="text-xs text-muted-foreground">RAM</span>
-          <span className="text-2xl font-semibold tabular-nums">{device.ram}%</span>
-          <span className="text-xs text-muted-foreground">Memory pressure</span>
+          <span className="text-2xl font-semibold tabular-nums">{ramUsed}%</span>
+          <span className="text-xs text-muted-foreground">
+            {device.totalRAM > 0
+              ? `${((device.totalRAM - device.freeRam) / 1073741824).toFixed(1)} / ${(device.totalRAM / 1073741824).toFixed(1)} GB`
+              : "Memory pressure"}
+          </span>
           <MemoryStick className="mt-2 size-4 text-muted-foreground" />
         </Card>
         <Card className="gap-1 p-4">
-          <span className="text-xs text-muted-foreground">Disk</span>
-          <span className="text-2xl font-semibold tabular-nums">{device.disk}%</span>
-          <span className="text-xs text-muted-foreground">Storage usage</span>
-          <HardDrive className="mt-2 size-4 text-muted-foreground" />
+          <span className="text-xs text-muted-foreground">Uptime</span>
+          <span className="text-2xl font-semibold tabular-nums">{device.uptime || "N/A"}</span>
+          <span className="text-xs text-muted-foreground">{device.numCPU ? `${device.numCPU} CPU cores` : "Since last boot"}</span>
+          <Clock className="mt-2 size-4 text-muted-foreground" />
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_360px]">
-        <Card className="gap-3 p-4">
-          <h2 className="text-sm font-semibold">Endpoint Profile</h2>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <div className="rounded-lg border border-border p-3">
-              <p className="text-xs text-muted-foreground">Hostname</p>
-              <p className="font-medium">{device.name}</p>
-            </div>
-            <div className="rounded-lg border border-border p-3">
-              <p className="text-xs text-muted-foreground">Operating system</p>
-              <p className="font-medium">{osLabels[device.os] || device.os}</p>
-            </div>
-            <div className="rounded-lg border border-border p-3">
-              <p className="text-xs text-muted-foreground">Status</p>
-              <Badge className="mt-1 capitalize">{device.status}</Badge>
-            </div>
-            <div className="rounded-lg border border-border p-3">
-              <p className="text-xs text-muted-foreground">Last check-in</p>
-              <p className="font-medium">{device.lastSync}</p>
-            </div>
-          </div>
-        </Card>
+      {/* Tab Container */}
+      <Tabs defaultValue="summary" value={activeTab} onValueChange={setActiveTab}>
+        <TabsList>
+          <TabsTrigger value="summary">
+            <Server className="mr-1.5 size-3.5" />
+            Summary
+          </TabsTrigger>
+          <TabsTrigger value="software">
+            <Package className="mr-1.5 size-3.5" />
+            Software
+          </TabsTrigger>
+          <TabsTrigger value="patches">
+            <Shield className="mr-1.5 size-3.5" />
+            Patches
+          </TabsTrigger>
+          <TabsTrigger value="checks">
+            <Activity className="mr-1.5 size-3.5" />
+            Checks
+          </TabsTrigger>
+          <TabsTrigger value="notes">
+            <StickyNote className="mr-1.5 size-3.5" />
+            Notes
+          </TabsTrigger>
+          <TabsTrigger value="assets">
+            <Boxes className="mr-1.5 size-3.5" />
+            Assets
+          </TabsTrigger>
+          <TabsTrigger value="debug">
+            <Bug className="mr-1.5 size-3.5" />
+            Debug
+          </TabsTrigger>
+          <TabsTrigger value="audit">
+            <Layers className="mr-1.5 size-3.5" />
+            Audit
+          </TabsTrigger>
+        </TabsList>
 
-        <Card className="gap-3 p-4">
-          <h2 className="text-sm font-semibold">Active Incidents</h2>
-          {relatedAlerts.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No active incidents for this endpoint.</p>
-          ) : (
-            <ul className="space-y-2">
-              {relatedAlerts.map((alert) => (
-                <li key={alert.id} className="rounded-lg border border-border p-3">
-                  <div className="flex items-center gap-2">
-                    <ShieldAlert className="size-4 text-warning" />
-                    <Badge variant="outline" className="capitalize">
-                      {alert.severity}
-                    </Badge>
-                    <span className="ml-auto text-xs text-muted-foreground">{alert.time}</span>
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">{alert.message}</p>
-                  <Link
-                    href={`/alerts/${alert.id}`}
-                    className="mt-2 inline-block text-xs font-medium text-primary hover:underline"
-                  >
-                    Open incident
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
-
-      <Card className="gap-3 p-4">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Backups</h2>
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{backups.length} records</Badge>
-            <Link href="/backups" className="text-xs font-medium text-primary hover:underline">
-              Open backups module
-            </Link>
-          </div>
-        </div>
-
-        {backups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No backup records available for this endpoint.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {backups.map((backup) => (
-              <div
-                key={backup.id}
-                className="grid grid-cols-1 gap-2 rounded-lg border border-border p-3 md:grid-cols-[1fr_auto_auto]"
-              >
-                <div>
-                  <p className="font-medium">{backup.name}</p>
-                  <p className="text-xs text-muted-foreground">{backup.location}</p>
-                  <p className="text-xs text-muted-foreground">{backup.createdAt}</p>
-                </div>
-                <div className="flex items-center gap-2 md:justify-self-end">
-                  <Badge variant="outline" className="capitalize">
-                    {backup.type}
-                  </Badge>
-                  <Badge variant="outline" className="capitalize">
-                    {backup.status}
-                  </Badge>
-                </div>
-                <div className="text-sm font-medium md:justify-self-end">{backup.size}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+        <TabsContent value="summary">
+          <SummaryTab device={device} alertsNotImplemented backupsNotImplemented />
+        </TabsContent>
+        <TabsContent value="software">
+          <SoftwareTab agentId={device.id} />
+        </TabsContent>
+        <TabsContent value="patches">
+          <PatchesTab agentId={device.id} />
+        </TabsContent>
+        <TabsContent value="checks">
+          <ChecksTab agentId={device.id} />
+        </TabsContent>
+        <TabsContent value="notes">
+          <NotesTab agentId={device.id} />
+        </TabsContent>
+        <TabsContent value="assets">
+          <AssetsTab agent={device} />
+        </TabsContent>
+        <TabsContent value="debug">
+          <DebugTab agentId={device.id} />
+        </TabsContent>
+        <TabsContent value="audit">
+          <AuditTab agentId={device.id} />
+        </TabsContent>
+      </Tabs>
     </ConsoleShell>
   )
 }

@@ -23,6 +23,21 @@ export type Device = {
   lastSync: string
   lastSeen?: string
   ip: string
+  vendor?: string
+  model?: string
+  serialNumber?: string
+  uptime?: string
+  kernelVersion?: string
+  agentVersion?: string
+  localIP?: string
+  macAddress?: string
+  gateway?: string
+  numCPU?: number
+  cpuModel?: string
+  totalRam?: number
+  freeRam?: number
+  diskTotal?: number
+  diskFree?: number
 }
 
 export type AlertEvent = {

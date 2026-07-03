@@ -1,13 +1,14 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import {
   Activity,
   ArchiveRestore,
   Bell,
   ChevronsUpDown,
   LayoutDashboard,
+  LogOut,
   MonitorSmartphone,
   Settings,
   TerminalSquare,
@@ -22,6 +23,8 @@ import {
 import { tenants } from "@/lib/rmm-data"
 import { useAgents, useAlerts, useBackups } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
+import { logout, getCurrentUser } from "@/lib/api"
+import { Button } from "@/components/ui/button"
 
 const nav = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", badge: null },
@@ -40,6 +43,7 @@ export function Sidebar({
   onTenantChange: (value: string) => void
 }) {
   const pathname = usePathname()
+  const router = useRouter()
 
   // Live counts from the backend — these replace the static mock values
   const { agents } = useAgents(5000)
@@ -81,7 +85,7 @@ export function Sidebar({
         <label className="mb-1.5 block px-1 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
           Active Client
         </label>
-        <Select value={tenant} onValueChange={onTenantChange}>
+        <Select value={tenant} onValueChange={(v) => v && onTenantChange(v)}>
           <SelectTrigger className="w-full bg-secondary/60">
             <SelectValue>
               {(value: string) => tenants.find((t) => t.id === value)?.name}
@@ -134,13 +138,32 @@ export function Sidebar({
 
       <div className="border-t border-sidebar-border p-3">
         <div className="flex items-center gap-3 rounded-md px-1 py-1">
-          <div className="flex size-8 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground ring-1 ring-border">
-            JM
-          </div>
-          <div className="flex min-w-0 flex-col leading-tight">
-            <span className="truncate text-sm font-medium">Jordan Meyer</span>
-            <span className="truncate text-xs text-muted-foreground">Systems Engineer</span>
-          </div>
+          {(() => {
+            const user = getCurrentUser()
+            const name = user?.fullName || user?.userId?.slice(0, 8) || "User"
+            const role = user?.role || "technician"
+            const initials = name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()
+            return (
+              <>
+                <div className="flex size-8 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground ring-1 ring-border">
+                  {initials}
+                </div>
+                <div className="flex min-w-0 flex-1 flex-col leading-tight">
+                  <span className="truncate text-sm font-medium">{name}</span>
+                  <span className="truncate text-xs text-muted-foreground capitalize">{role}</span>
+                </div>
+              </>
+            )
+          })()}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground hover:text-destructive"
+            title="Sign out"
+            onClick={() => { logout(); router.push("/login") }}
+          >
+            <LogOut className="size-4" />
+          </Button>
         </div>
       </div>
     </aside>

@@ -1,13 +1,14 @@
 "use client"
 
 import Link from "next/link"
-import { AlertOctagon, AlertTriangle, Info } from "lucide-react"
+import { AlertOctagon, AlertTriangle, Info, Loader2 } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { severityToneClasses } from "@/components/rmm/indicators"
-import { alerts as mockAlerts, type Severity } from "@/lib/rmm-data"
-import { useAlerts, type AlertRow } from "@/lib/use-live-data"
+import { useAlerts } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
+
+type Severity = "critical" | "warning" | "info"
 
 const icons: Record<Severity, typeof Info> = {
   critical: AlertOctagon,
@@ -21,13 +22,11 @@ const dotColor: Record<Severity, string> = {
   info: "bg-info",
 }
 
-/** Maps a raw backend AlertRow into a display-friendly shape. */
-function toDisplayAlert(a: AlertRow) {
-  // Normalise severity — backend may emit strings not in the Severity union
+function toDisplayAlert(a: { id: number; agentId: string; severity: string; message: string; time: string }) {
   const sev: Severity =
     a.severity === "critical" || a.severity === "warning" ? a.severity : "info"
   return {
-    id: String(a.id),
+    id: a.id,
     device: a.agentId,
     message: a.message,
     severity: sev,
@@ -36,10 +35,9 @@ function toDisplayAlert(a: AlertRow) {
 }
 
 export function AlertsPanel() {
-  const { alerts: liveAlerts } = useAlerts(10000)
+  const { alerts: liveAlerts, loading } = useAlerts(10000)
 
-  // Prefer live data; fall back to mock when backend is unreachable
-  const raw = liveAlerts.length > 0 ? liveAlerts.map(toDisplayAlert) : mockAlerts
+  const raw = liveAlerts.map(toDisplayAlert)
   const criticalCount = raw.filter((a) => a.severity === "critical").length
 
   return (
@@ -53,6 +51,19 @@ export function AlertsPanel() {
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-6 text-xs text-muted-foreground">
+            <Loader2 className="size-3 animate-spin" />
+            Connecting...
+          </div>
+        )}
+
+        {!loading && raw.length === 0 && (
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+            No active alerts
+          </div>
+        )}
+
         <ul className="divide-y divide-border">
           {raw.map((a) => {
             const Icon = icons[a.severity]

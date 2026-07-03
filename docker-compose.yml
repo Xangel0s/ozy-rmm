@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apexrmm
+      POSTGRES_USER: apexrmm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apexrmm_secret_2024}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apexrmm -d apexrmm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-use-a-real-secret}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000}
+      - DATABASE_URL=postgres://apexrmm:${POSTGRES_PASSWORD:-apexrmm_secret_2024}@postgres:5432/apexrmm?sslmode=disable
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@apexrmm.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-password123}
+      - AGENT_ENROLL_SECRET=${AGENT_ENROLL_SECRET:-change-this-enrollment-secret}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8080
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

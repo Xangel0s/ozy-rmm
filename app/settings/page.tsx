@@ -80,7 +80,7 @@ export default function SettingsPage() {
 
           <div className="flex flex-col gap-1.5">
             <span className="text-xs font-medium text-muted-foreground">Timezone</span>
-            <Select value={timezone} onValueChange={setTimezone}>
+            <Select value={timezone} onValueChange={(v) => v && setTimezone(v)}>
               <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select timezone" />
               </SelectTrigger>

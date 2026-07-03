@@ -3,14 +3,13 @@
 import * as React from "react"
 import Link from "next/link"
 import { toast } from "sonner"
-import { AlertOctagon, AlertTriangle, CheckCheck, Info } from "lucide-react"
+import { AlertOctagon, AlertTriangle, CheckCheck, Info, Loader2 } from "lucide-react"
 import { ConsoleShell } from "@/components/rmm/console-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { alerts as mockAlerts, devices as mockDevices } from "@/lib/rmm-data"
 import { useAlerts, useAgents, agentToDevice } from "@/lib/use-live-data"
-import type { AlertRow } from "@/lib/api"
+import { acknowledgeAlert } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 type Severity = "critical" | "warning" | "info"
@@ -27,12 +26,11 @@ const severityTone = {
   info: "text-info bg-info/10 border-info/30",
 }
 
-/** Normalise raw backend AlertRow into a display-friendly shape. */
-function toDisplayAlert(a: AlertRow) {
+function toDisplayAlert(a: { id: number; agentId: string; severity: string; message: string; time: string }) {
   const sev: Severity =
     a.severity === "critical" || a.severity === "warning" ? a.severity : "info"
   return {
-    id: String(a.id),
+    id: a.id,
     device: a.agentId,
     message: a.message,
     severity: sev,
@@ -44,15 +42,13 @@ export default function AlertsPage() {
   const [tenant, setTenant] = React.useState("all")
   const [query, setQuery] = React.useState("")
   const [severity, setSeverity] = React.useState<"all" | Severity>("all")
+  const [acknowledging, setAcknowledging] = React.useState<number | null>(null)
 
-  // Live data
-  const { alerts: liveAlerts } = useAlerts(10000)
+  const { alerts: liveAlerts, loading } = useAlerts(10000)
   const { agents } = useAgents(5000)
   const liveDevices = React.useMemo(() => agents.map(agentToDevice), [agents])
 
-  // Prefer live data, fall back to mocks
-  const allAlerts = liveAlerts.length > 0 ? liveAlerts.map(toDisplayAlert) : mockAlerts
-  const allDevices = liveDevices.length > 0 ? liveDevices : mockDevices
+  const allAlerts = React.useMemo(() => liveAlerts.map(toDisplayAlert), [liveAlerts])
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -75,16 +71,20 @@ export default function AlertsPage() {
     [allAlerts],
   )
 
-  // Map agent ID / device name to a device for linking
   const deviceIdByName = React.useMemo(
-    () => new Map(allDevices.map((d) => [d.name, d.id])),
-    [allDevices],
+    () => new Map(liveDevices.map((d) => [d.name, d.id])),
+    [liveDevices],
   )
 
-  const acknowledgeAll = () => {
-    toast.success("Alerts acknowledged", {
-      description: `${filtered.length} alert event${filtered.length === 1 ? "" : "s"} marked as reviewed.`,
-    })
+  const handleAcknowledge = async (alertId: number) => {
+    setAcknowledging(alertId)
+    const ok = await acknowledgeAlert(alertId)
+    setAcknowledging(null)
+    if (ok) {
+      toast.success("Alert acknowledged")
+    } else {
+      toast.error("Failed to acknowledge alert")
+    }
   }
 
   return (
@@ -136,64 +136,82 @@ export default function AlertsPage() {
                 </button>
               ))}
             </div>
-
-            <Button variant="outline" size="sm" onClick={acknowledgeAll}>
-              <CheckCheck data-icon="inline-start" />
-              Acknowledge
-            </Button>
           </div>
         </div>
 
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Loading alerts from agents...
+          </div>
+        )}
+
+        {!loading && filtered.length === 0 && (
+          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+            {allAlerts.length === 0
+              ? "No alerts detected. Agents will report alerts when metrics exceed thresholds."
+              : "No alerts match the current filter."}
+          </div>
+        )}
+
         <ul className="divide-y divide-border">
-          {filtered.length === 0 ? (
-            <li className="px-4 py-8 text-center text-sm text-muted-foreground">
-              No alerts match the current filter.
-            </li>
-          ) : (
-            filtered.map((alert) => {
-              const Icon = severityIcon[alert.severity]
-              const deviceId = deviceIdByName.get(alert.device)
-              return (
-                <li key={alert.id} className="flex items-start gap-3 px-4 py-3 hover:bg-muted/30">
-                  <span
-                    className={cn(
-                      "mt-0.5 inline-flex size-7 items-center justify-center rounded-md border",
-                      severityTone[alert.severity],
-                    )}
-                  >
-                    <Icon className="size-4" />
-                  </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-1">
-                    <div className="flex items-center gap-2">
-                      {deviceId ? (
-                        <Link
-                          href={`/devices/${deviceId}`}
-                          className="font-mono text-xs font-semibold transition-colors hover:text-primary"
-                        >
-                          {alert.device}
-                        </Link>
-                      ) : (
-                        <span className="font-mono text-xs font-semibold">{alert.device}</span>
-                      )}
-                      <Badge variant="outline" className="capitalize">
-                        {alert.severity}
-                      </Badge>
-                      <span className="ml-auto text-xs text-muted-foreground">{alert.time}</span>
-                    </div>
-                    <p className="text-sm text-muted-foreground">{alert.message}</p>
-                    <div>
+          {filtered.map((alert) => {
+            const Icon = severityIcon[alert.severity]
+            const deviceId = deviceIdByName.get(alert.device)
+            return (
+              <li key={alert.id} className="flex items-start gap-3 px-4 py-3 hover:bg-muted/30">
+                <span
+                  className={cn(
+                    "mt-0.5 inline-flex size-7 items-center justify-center rounded-md border",
+                    severityTone[alert.severity],
+                  )}
+                >
+                  <Icon className="size-4" />
+                </span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    {deviceId ? (
                       <Link
-                        href={`/alerts/${alert.id}`}
-                        className="text-xs font-medium text-primary hover:underline"
+                        href={`/devices/${deviceId}`}
+                        className="font-mono text-xs font-semibold transition-colors hover:text-primary"
                       >
-                        Open incident details
+                        {alert.device}
                       </Link>
-                    </div>
+                    ) : (
+                      <span className="font-mono text-xs font-semibold">{alert.device}</span>
+                    )}
+                    <Badge variant="outline" className="capitalize">
+                      {alert.severity}
+                    </Badge>
+                    <span className="ml-auto text-xs text-muted-foreground">{alert.time}</span>
                   </div>
-                </li>
-              )
-            })
-          )}
+                  <p className="text-sm text-muted-foreground">{alert.message}</p>
+                  <div className="flex items-center gap-3">
+                    <Link
+                      href={`/alerts/${alert.id}`}
+                      className="text-xs font-medium text-primary hover:underline"
+                    >
+                      Open incident details
+                    </Link>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs"
+                      disabled={acknowledging === alert.id}
+                      onClick={() => handleAcknowledge(alert.id)}
+                    >
+                      {acknowledging === alert.id ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <CheckCheck className="size-3" />
+                      )}
+                      Acknowledge
+                    </Button>
+                  </div>
+                </div>
+              </li>
+            )
+          })}
         </ul>
       </Card>
     </ConsoleShell>
