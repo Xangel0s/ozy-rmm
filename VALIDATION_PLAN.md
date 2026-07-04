@@ -117,7 +117,7 @@ No bloquea producción pero debe resolverse antes de escalar.
 | Área | Estado | Preguntas a resolver |
 |------|--------|----------------------|
 | **Alerting real** | ✅ Completo | Motor de alertas: CPU ≥ 90%, RAM < 10% free, Disk < 10% free. Todos con dedup (10 min). |
-| **Backup jobs** | ⚠️ Mock | Tabla `backup_jobs` tiene seed data hardcodeado (status: completed falso). Agent tiene Kopia sidecar pero no se invoca automáticamente. No hay scheduler real. |
+| **Backup jobs** | ✅ Implementado | Scheduler goroutine cada 60s, ejecuta jobs según cron, envía backup_command al agent. Agent ejecuta Kopia sidecar. DB actualiza con resultado. |
 | **Onboarding de agentes** | ✅ Parcial | Tabla `registration_tokens` existe. ¿Flujo de instalación documentado? ¿Rotación de tokens? ¿Expiración? |
 | **RBAC / permisos granulares** | ✅ Implementado | 3 roles: admin, technician, agent. `denyIfUnauthorized()` aplica en todos los endpoints. Viewer postergado. |
 | **Rate limiting** | ❓ | Con 20+ endpoints, ¿hay límite por tenant o por usuario? |

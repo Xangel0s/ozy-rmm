@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	_ "github.com/lib/pq"
+	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -170,16 +171,17 @@ type AgentInfo struct {
 }
 
 type BackupJob struct {
-	ID         int64  `json:"id"`
-	AgentID    string `json:"agentId"`
-	Name       string `json:"name"`
-	Location   string `json:"location"`
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	SizeBytes  int64  `json:"sizeBytes"`
-	Cron       string `json:"cron"`
-	ExecutedAt string `json:"executedAt"`
-	CreatedAt  string `json:"createdAt"`
+	ID          int64  `json:"id"`
+	AgentID     string `json:"agentId"`
+	Name        string `json:"name"`
+	Location    string `json:"location"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	SizeBytes   int64  `json:"sizeBytes"`
+	Cron        string `json:"cron"`
+	ExecutedAt  string `json:"executedAt"`
+	NextRunTime string `json:"nextRunTime"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 type AlertRow struct {
@@ -408,6 +410,7 @@ func runMigrations() {
 		size_bytes BIGINT DEFAULT 0,
 		cron VARCHAR(100) DEFAULT '0 2 * * *',
 		executed_at TIMESTAMPTZ,
+		next_run_time TIMESTAMPTZ,
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
 
@@ -872,6 +875,145 @@ func seedBackupJob(tenantID, agentID string) {
 	}
 }
 
+// ─── Backup Scheduler ────────────────────────────────────────────────────────
+
+func parseNextCronRun(cronExpr string) *time.Time {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse(cronExpr)
+	if err != nil {
+		log.Printf("backup-scheduler: invalid cron expression '%s': %v", cronExpr, err)
+		return nil
+	}
+	next := schedule.Next(time.Now().UTC())
+	return &next
+}
+
+func startBackupScheduler() {
+	log.Printf("backup-scheduler: starting (check interval: 60s)")
+
+	// Set initial next_run_time for jobs that don't have one
+	_, err := db.Exec(`
+		UPDATE backup_jobs
+		SET next_run_time = COALESCE(next_run_time, now())
+		WHERE next_run_time IS NULL AND status != 'running'
+	`)
+	if err != nil {
+		log.Printf("backup-scheduler: failed to initialize next_run_time: %v", err)
+	}
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		executePendingBackupJobs()
+	}
+}
+
+func executePendingBackupJobs() {
+	rows, err := db.Query(`
+		SELECT id, tenant_id, agent_id, name, location, type, cron
+		FROM backup_jobs
+		WHERE next_run_time <= NOW() AND status != 'running'
+		LIMIT 10
+	`)
+	if err != nil {
+		log.Printf("backup-scheduler: query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var tenantID, agentID, name, location, typ, cronExpr string
+		if err := rows.Scan(&id, &tenantID, &agentID, &name, &location, &typ, &cronExpr); err != nil {
+			continue
+		}
+
+		// Mark as running
+		db.Exec(`UPDATE backup_jobs SET status = 'running' WHERE id = $1`, id)
+
+		go executeBackupJobAsync(id, tenantID, agentID, name, location, typ, cronExpr)
+	}
+}
+
+func executeBackupJobAsync(jobID int64, tenantID, agentID, name, location, typ, cronExpr string) {
+	log.Printf("backup-scheduler: executing job %d (%s) on agent %s", jobID, name, agentID)
+
+	// Calculate next run time BEFORE executing
+	nextRun := parseNextCronRun(cronExpr)
+	if nextRun != nil {
+		db.Exec(`UPDATE backup_jobs SET next_run_time = $1 WHERE id = $2`, *nextRun, jobID)
+	}
+
+	// Check if agent is connected
+	agentsMu.Lock()
+	agent, ok := agents[agentID]
+	agentsMu.Unlock()
+
+	if !ok {
+		log.Printf("backup-scheduler: agent %s not connected, marking job %d as pending", agentID, jobID)
+		db.Exec(`UPDATE backup_jobs SET status = 'pending' WHERE id = $1`, jobID)
+		return
+	}
+
+	// Send backup command to agent
+	payloadBytes, _ := json.Marshal(map[string]interface{}{
+		"jobId":      jobID,
+		"sourcePaths": []string{location},
+		"jobType":     typ,
+	})
+
+	msg := Message{
+		AgentID: agentID,
+		Type:    "backup_command",
+		Payload: string(payloadBytes),
+	}
+	msgBytes, _ := json.Marshal(msg)
+
+	agent.Mu.Lock()
+	err := agent.Conn.WriteMessage(websocket.TextMessage, msgBytes)
+	agent.Mu.Unlock()
+
+	if err != nil {
+		log.Printf("backup-scheduler: failed to send backup command to agent %s: %v", agentID, err)
+		db.Exec(`UPDATE backup_jobs SET status = 'failed' WHERE id = $1`, jobID)
+		return
+	}
+
+	// Update executed_at
+	now := time.Now().UTC()
+	db.Exec(`UPDATE backup_jobs SET executed_at = $1 WHERE id = $2`, now, jobID)
+
+	auditLog(tenantID, "", "backup.run", "backup_job", fmt.Sprintf("%d", jobID), map[string]interface{}{
+		"agentId": agentID,
+		"name":    name,
+	})
+}
+
+func handleBackupStatusMessage(payload string) {
+	var result struct {
+		JobID  int64  `json:"jobId"`
+		Status string `json:"status"`
+		Size   int64  `json:"sizeBytes"`
+		Error  string `json:"error"`
+	}
+
+	if err := json.Unmarshal([]byte(payload), &result); err != nil {
+		log.Printf("backup-scheduler: invalid backup_status payload: %v", err)
+		return
+	}
+
+	if result.Status == "completed" {
+		db.Exec(`
+			UPDATE backup_jobs SET status = 'completed', size_bytes = $1 WHERE id = $2
+		`, result.Size, result.JobID)
+		log.Printf("backup-scheduler: job %d completed (size: %d bytes)", result.JobID, result.Size)
+	} else if result.Status == "failed" {
+		db.Exec(`UPDATE backup_jobs SET status = 'failed' WHERE id = $1`, result.JobID)
+		log.Printf("backup-scheduler: job %d failed: %s", result.JobID, result.Error)
+	}
+}
+
 // ─── WebSocket Event Hub ──────────────────────────────────────────────────────
 
 type ClientEventConnection struct {
@@ -1233,7 +1375,7 @@ func handleListBackups(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := db.Query(`
 		SELECT id, agent_id, COALESCE(name,''), COALESCE(location,''), type, status,
-		       size_bytes, cron, COALESCE(executed_at::text,''), COALESCE(created_at::text,'')
+		       size_bytes, cron, COALESCE(executed_at::text,''), COALESCE(next_run_time::text,''), COALESCE(created_at::text,'')
 		FROM backup_jobs
 		WHERE tenant_id = $1
 		ORDER BY id DESC
@@ -1248,7 +1390,7 @@ func handleListBackups(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var b BackupJob
 		if err := rows.Scan(&b.ID, &b.AgentID, &b.Name, &b.Location, &b.Type, &b.Status,
-			&b.SizeBytes, &b.Cron, &b.ExecutedAt, &b.CreatedAt); err != nil {
+			&b.SizeBytes, &b.Cron, &b.ExecutedAt, &b.NextRunTime, &b.CreatedAt); err != nil {
 			continue
 		}
 		list = append(list, b)
@@ -1583,6 +1725,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 
 		case "backup_status":
 			log.Printf("Backup progress from agent %s: %s", agentID, msg.Payload)
+			handleBackupStatusMessage(msg.Payload)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "software_list":
@@ -1675,6 +1818,10 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				UPDATE agent_checks SET status = $1, last_output = $2, last_run = NOW()
 				WHERE id = $3
 			`, result.Status, result.Output, result.CheckID)
+			broadcastToFrontend(agentID, msgBytes)
+
+		case "software_uninstall_result":
+			log.Printf("Software uninstall result from agent %s: %s", agentID, msg.Payload)
 			broadcastToFrontend(agentID, msgBytes)
 		}
 	}
@@ -2656,6 +2803,7 @@ func main() {
 	cfg = loadConfig()
 	initDB()
 	pruneOldTelemetry()
+	go startBackupScheduler()
 
 	// Public routes
 	http.HandleFunc("/health", handleHealth)
