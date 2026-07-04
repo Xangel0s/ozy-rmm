@@ -1,13 +1,13 @@
 "use client"
 
 import * as React from "react"
-import { Package, Search, RefreshCw } from "lucide-react"
+import { Package, Search, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { fetchSoftware, scanSoftware, type SoftwareItem } from "@/lib/api"
+import { fetchSoftware, scanSoftware, uninstallSoftware, type SoftwareItem } from "@/lib/api"
 
 interface SoftwareTabProps {
   agentId: string;
@@ -21,6 +21,7 @@ export function SoftwareTab({ agentId }: SoftwareTabProps) {
   const [page, setPage] = React.useState(0)
   const [total, setTotal] = React.useState(0)
   const [hasMore, setHasMore] = React.useState(false)
+  const [uninstalling, setUninstalling] = React.useState<string | null>(null)
   const limit = 50
 
   const loadSoftware = React.useCallback(async (offset: number) => {
@@ -51,6 +52,31 @@ export function SoftwareTab({ agentId }: SoftwareTabProps) {
       toast.error("Failed to initiate scan")
     } finally {
       setScanning(false)
+    }
+  }
+
+  const handleUninstall = async (item: SoftwareItem) => {
+    if (!item.quietUninstallString) {
+      toast.error("No uninstall string available for this software")
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to uninstall "${item.name}"?\n\nThis will execute:\n${item.quietUninstallString}`
+    )
+    if (!confirmed) return
+
+    setUninstalling(String(item.id))
+    try {
+      await uninstallSoftware(agentId, String(item.id))
+      toast.success("Uninstall initiated", {
+        description: `${item.name} will be uninstalled shortly.`,
+      })
+      setTimeout(() => loadSoftware(0), 5000)
+    } catch {
+      toast.error("Failed to initiate uninstall")
+    } finally {
+      setUninstalling(null)
     }
   }
 
@@ -115,7 +141,8 @@ export function SoftwareTab({ agentId }: SoftwareTabProps) {
                 <th className="pb-2 pr-4">Publisher</th>
                 <th className="pb-2 pr-4">Version</th>
                 <th className="pb-2 pr-4">Size</th>
-                <th className="pb-2">Installed</th>
+                <th className="pb-2 pr-4">Installed</th>
+                <th className="pb-2 text-right">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -125,11 +152,25 @@ export function SoftwareTab({ agentId }: SoftwareTabProps) {
                   <td className="py-2 pr-4 text-muted-foreground">{item.publisher || "—"}</td>
                   <td className="py-2 pr-4 font-mono text-xs">{item.version || "—"}</td>
                   <td className="py-2 pr-4 text-muted-foreground">{formatSize(item.estimatedSizeKB)}</td>
-                  <td className="py-2 text-muted-foreground">
+                  <td className="py-2 pr-4 text-muted-foreground">
                     {item.installDate
                       ? `${item.installDate.slice(0, 4)}-${item.installDate.slice(4, 6)}-${item.installDate.slice(6, 8)}`
                       : "—"
                     }
+                  </td>
+                  <td className="py-2 text-right">
+                    {item.quietUninstallString && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-destructive hover:text-destructive"
+                        onClick={() => handleUninstall(item)}
+                        disabled={uninstalling === String(item.id)}
+                      >
+                        <Trash2 className="size-3" />
+                        {uninstalling === String(item.id) ? "Removing..." : "Uninstall"}
+                      </Button>
+                    )}
                   </td>
                 </tr>
               ))}

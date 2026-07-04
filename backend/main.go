@@ -1800,6 +1800,9 @@ func handleAgentRoutes(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(path, "/software/scan") && r.Method == http.MethodPost {
 		if denyIfUnauthorized(w, r, "admin") { return }
 		handleScanSoftware(w, r)
+	} else if strings.Contains(path, "/software/") && strings.HasSuffix(path, "/uninstall") && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "admin") { return }
+		handleUninstallSoftware(w, r)
 	} else if strings.HasSuffix(path, "/notes") && r.Method == http.MethodGet {
 		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListNotes(w, r)
@@ -2534,6 +2537,98 @@ func handleRunCheck(w http.ResponseWriter, r *http.Request, checkID string) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "check initiated"})
+}
+
+// ─── Software Uninstall ──────────────────────────────────────────────────────
+
+func handleUninstallSoftware(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	if denyIfUnauthorized(w, r, "admin") { return }
+
+	tenantID := getTenantID(r)
+	claims := getClaims(r)
+
+	// Extract agentID and softwareID from path: /api/agents/{agentID}/software/{softwareID}/uninstall
+	path := r.URL.Path
+	path = strings.TrimPrefix(path, "/api/agents/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 || parts[1] != "software" || parts[2] == "" || (len(parts) > 3 && parts[3] != "uninstall") {
+		http.Error(w, `{"error":"invalid path"}`, http.StatusBadRequest)
+		return
+	}
+	agentID := parts[0]
+	softwareID := parts[2]
+
+	// Verify agent belongs to this tenant
+	var exists bool
+	db.QueryRow(`SELECT EXISTS(SELECT 1 FROM agents WHERE id=$1 AND tenant_id=$2)`, agentID, tenantID).Scan(&exists)
+	if !exists {
+		http.Error(w, `{"error":"agent not found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Get the quiet uninstall string
+	var uninstallString string
+	err := db.QueryRow(`
+		SELECT COALESCE(quiet_uninstall_string, '')
+		FROM agent_software WHERE id = $1 AND agent_id = $2 AND tenant_id = $3
+	`, softwareID, agentID, tenantID).Scan(&uninstallString)
+	if err != nil {
+		http.Error(w, `{"error":"software not found"}`, http.StatusNotFound)
+		return
+	}
+	if uninstallString == "" {
+		http.Error(w, `{"error":"no uninstall string available"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Get software name for audit log
+	var softwareName string
+	db.QueryRow(`SELECT name FROM agent_software WHERE id = $1`, softwareID).Scan(&softwareName)
+
+	// Check if agent is connected
+	agentsMu.Lock()
+	agent, ok := agents[agentID]
+	agentsMu.Unlock()
+
+	if !ok {
+		http.Error(w, `{"error":"agent not connected"}`, http.StatusNotFound)
+		return
+	}
+
+	// Send uninstall command to agent
+	payloadBytes, _ := json.Marshal(map[string]interface{}{
+		"softwareId":      softwareID,
+		"softwareName":    softwareName,
+		"uninstallString": uninstallString,
+	})
+
+	msg := Message{
+		AgentID: agentID,
+		Type:    "software_uninstall_command",
+		Payload: string(payloadBytes),
+	}
+	msgBytes, _ := json.Marshal(msg)
+
+	agent.Mu.Lock()
+	err = agent.Conn.WriteMessage(websocket.TextMessage, msgBytes)
+	agent.Mu.Unlock()
+
+	if err != nil {
+		http.Error(w, `{"error":"failed to send command"}`, http.StatusInternalServerError)
+		return
+	}
+
+	auditLog(tenantID, claims.UserID, "software.uninstall", "software", softwareID, map[string]interface{}{
+		"agentId": agentID,
+		"name":    softwareName,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"uninstalling"}`))
 }
 
 // ─── Telemetry Pruning ───────────────────────────────────────────────────────

@@ -300,6 +300,10 @@ export async function scanSoftware(agentId: string): Promise<void> {
   }
 }
 
+export async function uninstallSoftware(agentId: string, softwareId: string): Promise<{ status: string }> {
+  return await post<{ status: string }>(`/api/agents/${agentId}/software/${softwareId}/uninstall`)
+}
+
 // ─── Notes ───────────────────────────────────────────────────────────────────
 
 export type NoteItem = {

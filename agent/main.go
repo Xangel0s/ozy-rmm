@@ -501,6 +501,10 @@ func handleConnection(conn *websocket.Conn) {
 		case "check_command":
 			log.Printf("Received check command: %s", msg.Payload)
 			go executeCheck(conn, msg.Payload)
+
+		case "software_uninstall_command":
+			log.Printf("Received software uninstall command: %s", msg.Payload)
+			go executeSoftwareUninstall(conn, msg.Payload)
 		}
 	}
 }
@@ -1107,6 +1111,44 @@ func parseKopiaOutput(data []byte) string {
 		return fmt.Sprintf("Snapshot %s created (hash: %s)", result.SnapshotID, result.Hash[:min(12, len(result.Hash))])
 	}
 	return ""
+}
+
+// ─── Software Uninstall ──────────────────────────────────────────────────────
+
+type UninstallRequest struct {
+	SoftwareID      string `json:"softwareId"`
+	SoftwareName    string `json:"softwareName"`
+	UninstallString string `json:"uninstallString"`
+}
+
+func executeSoftwareUninstall(conn *websocket.Conn, payload string) {
+	var req UninstallRequest
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		sendWSMsg(conn, "software_uninstall_result", fmt.Sprintf(`{"error":"invalid payload: %v"}`, err))
+		return
+	}
+
+	log.Printf("Uninstalling software: %s (ID: %s)", req.SoftwareName, req.SoftwareID)
+	sendWSMsg(conn, "software_uninstall_result", fmt.Sprintf(`{"status":"started","softwareId":"%s","name":"%s"}`, req.SoftwareID, req.SoftwareName))
+
+	// Execute the uninstall command
+	// Use cmd.exe /c to run the uninstall string (handles msiexec, executables, etc.)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "cmd.exe", "/c", req.UninstallString)
+	output, err := cmd.CombinedOutput()
+
+	if err != nil {
+		log.Printf("Uninstall failed for %s: %v", req.SoftwareName, err)
+		sendWSMsg(conn, "software_uninstall_result", fmt.Sprintf(`{"status":"failed","softwareId":"%s","name":"%s","error":"%s","output":"%s"}`,
+			req.SoftwareID, req.SoftwareName, err.Error(), string(output)))
+		return
+	}
+
+	log.Printf("Uninstall completed for %s", req.SoftwareName)
+	sendWSMsg(conn, "software_uninstall_result", fmt.Sprintf(`{"status":"completed","softwareId":"%s","name":"%s","output":"%s"}`,
+		req.SoftwareID, req.SoftwareName, string(output)))
 }
 
 func min(a, b int) int {
