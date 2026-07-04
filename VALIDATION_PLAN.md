@@ -116,8 +116,8 @@ No bloquea producción pero debe resolverse antes de escalar.
 
 | Área | Estado | Preguntas a resolver |
 |------|--------|----------------------|
-| **Alerting real** | ❓ | ¿Hay motor de reglas (thresholds CPU/RAM/disco → genera alert)? La tabla `alerts` existe pero no vi lógica de generación |
-| **Backup jobs** | ❓ | Tabla `backup_jobs` existe — ¿hay scheduler, retry, notificación de fallos? |
+| **Alerting real** | ✅ Parcial | Motor de alertas existe: CPU ≥ 90% con dedup (10 min). NO hay thresholds de RAM ni disco. Motor limitado a CPU-only. |
+| **Backup jobs** | ⚠️ Mock | Tabla `backup_jobs` tiene seed data hardcodeado (status: completed falso). Agent tiene Kopia sidecar pero no se invoca automáticamente. No hay scheduler real. |
 | **Onboarding de agentes** | ✅ Parcial | Tabla `registration_tokens` existe. ¿Flujo de instalación documentado? ¿Rotación de tokens? ¿Expiración? |
 | **RBAC / permisos granulares** | ❓ | Hoy hay `tenantID` para aislación — ¿hay roles dentro del tenant (admin vs. técnico read-only)? |
 | **Rate limiting** | ❓ | Con 20+ endpoints, ¿hay límite por tenant o por usuario? |

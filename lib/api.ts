@@ -196,6 +196,14 @@ export async function fetchAlerts(): Promise<AlertRow[]> {
   }
 }
 
+export async function fetchAlertsByAgent(agentId: string, limit = 10): Promise<AlertRow[]> {
+  try {
+    return await get<AlertRow[]>(`/api/alerts?agent_id=${encodeURIComponent(agentId)}&limit=${limit}`)
+  } catch {
+    return []
+  }
+}
+
 export async function fetchAlert(id: string): Promise<AlertRow | null> {
   try {
     return await get<AlertRow>(`/api/alerts/detail?id=${encodeURIComponent(id)}`)

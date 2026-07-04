@@ -1008,13 +1008,28 @@ func handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := db.Query(`
-		SELECT id, agent_id, severity, message, COALESCE(created_at::text, '')
-		FROM alerts
-		WHERE tenant_id = $1
-		ORDER BY id DESC
-		LIMIT $2
-	`, tenantID, limit)
+	agentID := r.URL.Query().Get("agent_id")
+
+	var rows *sql.Rows
+	var err error
+
+	if agentID != "" {
+		rows, err = db.Query(`
+			SELECT id, agent_id, severity, message, COALESCE(created_at::text, '')
+			FROM alerts
+			WHERE tenant_id = $1 AND agent_id = $2
+			ORDER BY id DESC
+			LIMIT $3
+		`, tenantID, agentID, limit)
+	} else {
+		rows, err = db.Query(`
+			SELECT id, agent_id, severity, message, COALESCE(created_at::text, '')
+			FROM alerts
+			WHERE tenant_id = $1
+			ORDER BY id DESC
+			LIMIT $2
+		`, tenantID, limit)
+	}
 	if err != nil {
 		http.Error(w, `{"error":"DB error"}`, http.StatusInternalServerError)
 		return

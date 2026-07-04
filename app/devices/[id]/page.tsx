@@ -36,18 +36,37 @@ import { DebugTab } from "./debug-tab"
 import { AuditTab } from "./audit-tab"
 import { PatchesTab } from "./patches-tab"
 import { ChecksTab } from "./checks-tab"
-import type { DeviceSummary } from "./types"
+import { fetchAlertsByAgent } from "@/lib/api"
+import type { DeviceSummary, AlertSummary } from "./types"
 
 export default function DeviceDetailPage() {
   const [tenant, setTenant] = React.useState("all")
   const [query, setQuery] = React.useState("")
   const [showTerminal, setShowTerminal] = React.useState(false)
   const [activeTab, setActiveTab] = React.useState("summary")
+  const [recentAlerts, setRecentAlerts] = React.useState<AlertSummary[]>([])
 
   const params = useParams<{ id: string }>()
   const id = params?.id
 
   const { agents } = useAgents(5000)
+
+  // Fetch recent alerts for this agent
+  React.useEffect(() => {
+    if (!id) return
+    let cancelled = false
+    fetchAlertsByAgent(id, 10).then((data) => {
+      if (!cancelled) {
+        setRecentAlerts(data.map((a) => ({
+          id: String(a.id),
+          message: a.message,
+          severity: a.severity,
+          time: a.time,
+        })))
+      }
+    })
+    return () => { cancelled = true }
+  }, [id])
 
   const device = React.useMemo((): DeviceSummary | null => {
     const agent = agents.find((a) => a.id === id)
@@ -227,7 +246,7 @@ export default function DeviceDetailPage() {
         </TabsList>
 
         <TabsContent value="summary">
-          <SummaryTab device={device} alertsNotImplemented backupsNotImplemented />
+          <SummaryTab device={device} recentAlerts={recentAlerts} backupsNotImplemented />
         </TabsContent>
         <TabsContent value="software">
           <SoftwareTab agentId={device.id} />

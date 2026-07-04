@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import {
+  AlertTriangle,
   Cpu,
   HardDrive,
   MemoryStick,
@@ -13,13 +14,21 @@ import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
 import type { DeviceSummary } from "./types"
 
+interface AlertItem {
+  id: number
+  agentId: string
+  severity: "critical" | "warning" | "info"
+  message: string
+  time: string
+}
+
 interface SummaryTabProps {
   device: DeviceSummary;
-  alertsNotImplemented?: boolean;
+  recentAlerts?: AlertItem[];
   backupsNotImplemented?: boolean;
 }
 
-export function SummaryTab({ device, alertsNotImplemented, backupsNotImplemented }: SummaryTabProps) {
+export function SummaryTab({ device, recentAlerts = [], backupsNotImplemented }: SummaryTabProps) {
   const ramUsed = device.totalRAM > 0
     ? Math.round(((device.totalRAM - device.freeRam) / device.totalRAM) * 100)
     : 0
@@ -190,20 +199,44 @@ export function SummaryTab({ device, alertsNotImplemented, backupsNotImplemented
         </Card>
       )}
 
-      {/* Alerts & Backups - Not Implemented */}
-      {(alertsNotImplemented || backupsNotImplemented) && (
+      {/* Recent Alerts (CPU threshold only) */}
+      {recentAlerts.length > 0 && (
+        <Card className="gap-3 p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-yellow-400" />
+              <h2 className="text-sm font-semibold">Recent Alerts</h2>
+            </div>
+            <Badge variant="outline" className="text-[10px]">CPU threshold only</Badge>
+          </div>
+          <div className="space-y-2">
+            {recentAlerts.map((alert) => (
+              <div key={alert.id} className="flex items-start justify-between rounded-lg border border-border p-2">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium truncate">{alert.message}</p>
+                  <p className="text-[10px] text-muted-foreground">{alert.time}</p>
+                </div>
+                <Badge
+                  variant={alert.severity === "critical" ? "destructive" : alert.severity === "warning" ? "secondary" : "outline"}
+                  className="ml-2 shrink-0"
+                >
+                  {alert.severity}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Backups - Not Implemented (mock data, not trusted) */}
+      {backupsNotImplemented && (
         <Card className="gap-3 p-4">
           <div className="flex items-center gap-2 text-muted-foreground">
             <span className="text-xs">Note:</span>
-            {alertsNotImplemented && (
-              <Badge variant="outline" className="text-[10px]">Recent Alerts — not implemented</Badge>
-            )}
-            {backupsNotImplemented && (
-              <Badge variant="outline" className="text-[10px]">Recent Backups — not implemented</Badge>
-            )}
+            <Badge variant="outline" className="text-[10px]">Recent Backups — not implemented</Badge>
           </div>
           <p className="text-xs text-muted-foreground">
-            These sections will be connected to real data in a future update.
+            Backup data is seed-only (not real execution). Connecting to UI requires scheduler implementation.
           </p>
         </Card>
       )}
