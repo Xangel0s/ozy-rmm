@@ -1,30 +1,26 @@
-# Validation Plan — RMM Feature: Device Detail Tabs
+# Validation Plan — RMM System
 
 **Fecha creación:** 2026-07-03
-**Estado actual:** Completo en dev, validación de producción pendiente
+**Última actualización:** 2026-07-04
+**Estado actual:** Feature-complete en dev, validación de producción pendiente
 **Condición de cierre:** Archivar cuando todos los ítems 🔴 estén resueltos o marcados como N/A
 
 ---
 
 ## Pre-shipping Checklist
 
-Ítems que bloquean considerar la feature "lista para producción".
+| # | Ítem | Estado | Bloqueado por | Quién puede ejecutar |
+|---|------|--------|---------------|----------------------|
+| 1 | **VM Windows + Agente como Service (`LocalSystem`)** | ⏳ Pendiente | Necesita VM Windows limpia | Quien tenga acceso a VM |
+| 2 | **Test broadcast cross-tenant** | ⏳ Pendiente | Requiere 2 tenants conectados | QA o dev con 2 cuentas |
+| 3 | **KB regex fallback audit** | ✅ Cerrado | 10 entries sin KB filtradas (driver/firmware/Store) | N/A — resuelto |
 
-| # | Ítem | Bloqueado por | Quién puede ejecutar | Cuándo estimado |
-|---|------|---------------|----------------------|-----------------|
-| 1 | **VM Windows + Agente como Service (`LocalSystem`)** | Necesita VM Windows limpia (no dev machine) | Quien tenga acceso a VM | Antes de cerrar feature |
-| 2 | **Auditar 26/50 entries sin KB en Patches** | Requiere análisis de patrones en entries fallidas | Mismo dev que hizo el fix | Próxima sesión |
-| 3 | **Test broadcast cross-tenant con sesiones activas** | Requiere 2 usuarios/admins de tenants distintos conectados simultáneamente | QA o dev con 2 cuentas | Próxima sesión |
-| 4 | **Verificar reconexión forzada post-fix de seguridad** | Si sesiones WebSocket activas previas al fix no se reconectan, el bug de cross-tenant persiste hasta reconexión natural | Mismo dev que hizo el fix | Próxima sesión |
-
-### Detalle de cada ítem
-
-#### 1. VM Windows + Agente como Service (`LocalSystem`)
+### 1. VM Windows + Agente como Service
 
 **Por qué es crítico:**
 - `CoInitializeEx` puede comportarse diferente bajo `LocalSystem` vs proceso interactivo
 - WMI queries pueden tener permisos distintos
-- Si COM no inicializa como servicio, toda la feature de Patches queda inválida
+- Si COM no inicializa como servicio, Patches y Software scan quedan inválidos
 
 **Pasos:**
 ```
@@ -41,29 +37,7 @@
 **Resultado esperado:** Patches scan retorna KBs reales (no 0 entries)
 **Si falla:** Descartar COM IUpdateSearcher, volver a registry CBS con nota de que es incompleto
 
-#### 2. Auditar 26/50 entries sin KB
-
-**Contexto:** De 50 entries históricas, 39 tienen KB extraído del título por regex, 11 no.
-
-**De las 11 sin KB identificado:**
-- Driver updates (HP, Intel, NVIDIA) — 5 entries
-- WinAppRuntime updates — 5 entries
-- Firmware updates — 1 entry
-
-**Pasos:**
-```
-1. Revisar las 11 entries sin KB en kb_debug output
-2. Determinar si son entries que deberían aparecer en patch management
-3. Si sí: implementar extracción alternativa (vendor ID, version number)
-4. Si no: filtrar explícitamente (no mostrar entries sin KB como "unknown")
-5. Agregar logging: "KB fallback used for entry: <title>" para diagnóstico futuro
-```
-
-**Objetivo:** Reducir el 22% de entradas huérfanas a <5%, o filtrarlas explícitamente
-
-#### 3. Test broadcast cross-tenant
-
-**Contexto:** Fix de seguridad (Ítem 0) agregó filtro `tenantID` en `broadcastToFrontend()`
+### 2. Test broadcast cross-tenant
 
 **Pasos:**
 ```
@@ -74,82 +48,86 @@
 5. Verificar en logs del backend que el filtro se ejecuta
 ```
 
-**Herramienta:** Podría ser un script simple con `wscat` o un test de integración
+---
 
-#### 4. Verificar reconexión post-fix
+## Completado en esta sesión
 
-**Riesgo:** Si hay sesiones WebSocket activas ANTES del fix de seguridad, esas sesiones podrían seguir enviando datos cross-tenant hasta que se reconecten naturalmente.
+### ✅ Seguridad
 
-**Pasos:**
-```
-1. Conectar frontend al backend (versión sin fix)
-2. Aplicar fix de seguridad
-3. NO recargar el frontend
-4. Intentar enviar mensaje con agentId de otro tenant
-5. Verificar que el backend lo bloquea
-6. Si no lo bloquea: forzar reconexión en el frontend al detectar versión del servidor
-```
+| Feature | Detalle |
+|---------|---------|
+| **Broadcast tenant filtering** | `broadcastToFrontend()` filtra por `tenantID` |
+| **RBAC enforcement** | 3 roles (admin/technician/agent), `denyIfUnauthorized()` en 15 endpoints |
+| **Audit log** | Registra acciones destructivas (uninstall, backup, etc.) |
 
-**Solución probable:** No requiere acción — el fix se aplica en el handler del servidor, no en el cliente. Las sesiones existentes seguirán usando el handler actualizado en la siguiente llamada.
+### ✅ Alerting
+
+| Feature | Detalle |
+|---------|---------|
+| **CPU threshold** | `>= 90%` con dedup 10 min |
+| **RAM threshold** | `< 10% free` con dedup 10 min |
+| **Disk threshold** | `< 10% free` con dedup 10 min |
+
+### ✅ Acciones remotas
+
+| Feature | Detalle |
+|---------|---------|
+| **Software uninstall** | Admin-only, confirmación, audit log, timeout 5min |
+| **Health checks** | Sidecar con `go + context.WithTimeout` por check |
+| **Terminal remoto** | WebSocket bidireccional con xterm.js |
+
+### ✅ Backups
+
+| Feature | Detalle |
+|---------|---------|
+| **Scheduler** | Goroutine cada 60s, ejecuta según cron |
+| **Cron parsing** | `robfig/cron/v3` — expresiones estándar |
+| **Agent execution** | Kopia sidecar con reporting de resultado |
+
+### ✅ Device Detail Tabs (9 tabs)
+
+| Tab | Fuente de datos |
+|-----|-----------------|
+| Summary | Agent telemetry + GPU + disks |
+| Software | Registry scan (no Win32_Product) |
+| Patches | COM IUpdateSearcher + regex KB |
+| Checks | CRUD + sidecar execution |
+| Notes | CRUD con auto-save |
+| Assets | WMI key-value |
+| Debug | Agent logs (cursor pagination) |
+| Audit | Audit log (offset pagination) |
 
 ---
 
-## Deuda Técnica (post-shipping)
-
-No bloquea producción pero debe resolverse antes de escalar.
+## Deuda Técnica conocida
 
 | # | Ítem | Severidad | Notas |
 |---|------|-----------|-------|
-| 5 | Conectar `recentAlerts`/`recentBackups` a datos reales | Media | Hoy: badge "not implemented" explícito |
-| 6 | `cmd.Process.Kill()` explícito en checks sidecar | Baja | `exec.CommandContext` ya mata proceso en Windows |
-| 7 | Evaluar si Assets necesita endpoint propio a futuro | Baja | Solo si crece más allá de lo que `GET /api/agents` puede manejar |
+| 1 | Monitoring charts | Media | Telemetry existe pero sin visualización. 2-4h |
+| 2 | Multi-instance backups | Baja | Scheduler puede ejecutar 2x si backend escala. Necesita distributed lock |
+| 3 | User management UI | Baja | No hay página para crear/editar usuarios |
+| 4 | Agent auto-update | Baja | Versión es constante estática |
+| 5 | CI/CD pipeline | Baja | Todo manual hoy |
+| 6 | DB migrations versionadas | Baja | SQL inline en initDB() |
 
 ---
 
-## Inventario de Infra — Preguntas Abiertas
+## Infra del proyecto
 
-**Distinción de origen:**
-- ✅ **Confirmado por conversación** — Verificado en código o en esta sesión de desarrollo
-- ❓ **Asunción RMM típica** — Estándar de la industria, pero NO confirmado que exista en este proyecto
-
-### Tabla resumen
-
-| Área | Estado | Preguntas a resolver |
-|------|--------|----------------------|
-| **Alerting real** | ✅ Completo | Motor de alertas: CPU ≥ 90%, RAM < 10% free, Disk < 10% free. Todos con dedup (10 min). |
-| **Backup jobs** | ✅ Implementado | Scheduler goroutine cada 60s, ejecuta jobs según cron, envía backup_command al agent. Agent ejecuta Kopia sidecar. DB actualiza con resultado. |
-| **Onboarding de agentes** | ✅ Parcial | Tabla `registration_tokens` existe. ¿Flujo de instalación documentado? ¿Rotación de tokens? ¿Expiración? |
-| **RBAC / permisos granulares** | ✅ Implementado | 3 roles: admin, technician, agent. `denyIfUnauthorized()` aplica en todos los endpoints. Viewer postergado. |
-| **Rate limiting** | ❓ | Con 20+ endpoints, ¿hay límite por tenant o por usuario? |
-| **Observabilidad del backend** | ❓ | ¿Métricas, logs estructurados, tracing del backend mismo (no solo `agent_logs`)? |
-| **Migraciones de DB** | ❓ | Con 13 tablas, ¿hay sistema versionado (golang-migrate, atlas) o se corre SQL a mano? |
-| **CI/CD** | ❓ | ¿Pipeline que corra `go build`/`pnpm build` + tests automáticos, o todo manual? |
-| **Backups Postgres** | ❓ | ¿Backup automatizado del backend DB? ¿Disaster recovery? |
-| **Escalado WebSocket** | ❓ | `broadcastToFrontend` itera sesiones en memoria — ¿backend corre en una sola instancia hoy? |
-
-### Nota sobre las asunciones
-
-Los ítems marcados ❓ son preguntas legítimas, no gaps confirmados. Si alguno ya está resuelto, eliminarlo de esta lista. Si no está resuelto, probablemente es más urgente que features nuevas de UI.
-
----
-
-## Mejoras Incrementales
-
-Sobre lo ya construido, no urgentes.
-
-| Ítem | Nota |
-|------|------|
-| Migrar Summary tab a WebSocket | Cuando el resto de la app tenga el patrón, no antes |
-| Cursor pagination — validar bajo escritura concurrente | Pendiente de sesión de testing |
-| Software scan — comparar conteo vs. "Configuración > Apps" | <definir método de comparación> |
+| Componente | Estado |
+|------------|--------|
+| Backend | Go 1.23, PostgreSQL, JWT, WebSocket |
+| Agent | Go 1.23, WMI, COM, Kopia, SQLite |
+| Frontend | Next.js 15, React 19, Tailwind 4, Shadcn |
+| Deploy | docker-compose.yml, Dockerfiles |
 
 ---
 
 ## Condiciones de cierre del documento
 
 Este archivo se archiva cuando:
-1. Los 4 ítems 🔴 del Pre-shipping Checklist estén resueltos o marcados N/A
-2. Los 3 ítems 🟠 de deuda técnica estén en backlog con fecha estimada
-3. El inventario 🟡 tenga respuestas claras (resuelto o confirmado que no existe)
+1. VM validation esté completa (ítem #1 del Pre-shipping)
+2. Broadcast cross-tenant test pase (ítem #2)
+3. Los ítems de deuda técnica estén en backlog con fecha estimada
 
-**No archivar si:** Solo se completaron los ítems de código y no se ejecutó la validación en VM real.
+**No archivar si:** Solo se completaron features de código y no se ejecutó la validación en VM real.
