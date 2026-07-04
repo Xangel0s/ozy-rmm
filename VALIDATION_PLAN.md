@@ -119,7 +119,7 @@ No bloquea producción pero debe resolverse antes de escalar.
 | **Alerting real** | ✅ Parcial | Motor de alertas existe: CPU ≥ 90% con dedup (10 min). NO hay thresholds de RAM ni disco. Motor limitado a CPU-only. |
 | **Backup jobs** | ⚠️ Mock | Tabla `backup_jobs` tiene seed data hardcodeado (status: completed falso). Agent tiene Kopia sidecar pero no se invoca automáticamente. No hay scheduler real. |
 | **Onboarding de agentes** | ✅ Parcial | Tabla `registration_tokens` existe. ¿Flujo de instalación documentado? ¿Rotación de tokens? ¿Expiración? |
-| **RBAC / permisos granulares** | ❓ | Hoy hay `tenantID` para aislación — ¿hay roles dentro del tenant (admin vs. técnico read-only)? |
+| **RBAC / permisos granulares** | ✅ Implementado | 3 roles: admin, technician, agent. `denyIfUnauthorized()` aplica en todos los endpoints. Viewer postergado. |
 | **Rate limiting** | ❓ | Con 20+ endpoints, ¿hay límite por tenant o por usuario? |
 | **Observabilidad del backend** | ❓ | ¿Métricas, logs estructurados, tracing del backend mismo (no solo `agent_logs`)? |
 | **Migraciones de DB** | ❓ | Con 13 tablas, ¿hay sistema versionado (golang-migrate, atlas) o se corre SQL a mano? |

@@ -668,6 +668,29 @@ func requireRole(roles ...string) func(http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// checkRole returns true if the current user's role meets the minimum required level.
+// Role hierarchy: agent(0) < viewer(1) < technician(2) < admin(3)
+func checkRole(r *http.Request, minRole string) bool {
+	role := r.Context().Value(roleKey).(string)
+	roleLevel := map[string]int{
+		"agent":     0,
+		"viewer":    1,
+		"technician": 2,
+		"admin":     3,
+	}
+	return roleLevel[role] >= roleLevel[minRole]
+}
+
+func denyIfUnauthorized(w http.ResponseWriter, r *http.Request, minRole string) bool {
+	if !checkRole(r, minRole) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "insufficient permissions"})
+		return true
+	}
+	return false
+}
+
 func getClaims(r *http.Request) *Claims {
 	return r.Context().Value(claimsKey).(*Claims)
 }
@@ -955,6 +978,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListAgents(w http.ResponseWriter, r *http.Request) {
+	if denyIfUnauthorized(w, r, "technician") { return }
 	tenantID := getTenantID(r)
 
 	rows, err := db.Query(`
@@ -1000,6 +1024,7 @@ func handleListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListAlerts(w http.ResponseWriter, r *http.Request) {
+	if denyIfUnauthorized(w, r, "technician") { return }
 	tenantID := getTenantID(r)
 	limit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -1073,6 +1098,7 @@ func handleGetAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetAgent(w http.ResponseWriter, r *http.Request) {
+	if denyIfUnauthorized(w, r, "technician") { return }
 	tenantID := getTenantID(r)
 	agentID := r.URL.Query().Get("id")
 	if agentID == "" {
@@ -1160,6 +1186,7 @@ func handleAgentTelemetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListBackups(w http.ResponseWriter, r *http.Request) {
+	if denyIfUnauthorized(w, r, "technician") { return }
 	tenantID := getTenantID(r)
 
 	rows, err := db.Query(`
@@ -1194,6 +1221,7 @@ func handleRunBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
+	if denyIfUnauthorized(w, r, "admin") { return }
 
 	tenantID := getTenantID(r)
 	claims := getClaims(r)
@@ -1236,6 +1264,7 @@ func handleAcknowledgeAlert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
+	if denyIfUnauthorized(w, r, "technician") { return }
 
 	tenantID := getTenantID(r)
 	claims := getClaims(r)
@@ -1275,14 +1304,10 @@ func handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
+	if denyIfUnauthorized(w, r, "admin") { return }
 
 	tenantID := getTenantID(r)
 	claims := getClaims(r)
-
-	if claims.Role != "admin" {
-		http.Error(w, `{"error":"forbidden: only admins can create tokens"}`, http.StatusForbidden)
-		return
-	}
 
 	var req struct {
 		Label    string `json:"label"`
@@ -1684,12 +1709,8 @@ func handleTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func handleListUsers(w http.ResponseWriter, r *http.Request) {
 	tenantID := getTenantID(r)
-	claims := getClaims(r)
 
-	if claims.Role != "admin" {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
-		return
-	}
+	if denyIfUnauthorized(w, r, "admin") { return }
 
 	rows, err := db.Query(`
 		SELECT id, email, username, COALESCE(full_name,''), role, is_active, COALESCE(last_login::text,''), created_at::text
@@ -1732,24 +1753,34 @@ func handleListUsers(w http.ResponseWriter, r *http.Request) {
 func handleAgentRoutes(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	if strings.HasSuffix(path, "/software") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListSoftware(w, r)
 	} else if strings.HasSuffix(path, "/software/scan") && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleScanSoftware(w, r)
 	} else if strings.HasSuffix(path, "/notes") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListNotes(w, r)
 	} else if strings.HasSuffix(path, "/notes") && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleCreateNote(w, r)
 	} else if strings.HasSuffix(path, "/logs") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListLogs(w, r)
 	} else if strings.HasSuffix(path, "/audit") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListAudit(w, r)
 	} else if strings.HasSuffix(path, "/patches") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListPatches(w, r)
 	} else if strings.HasSuffix(path, "/patches/scan") && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleScanPatches(w, r)
 	} else if strings.HasSuffix(path, "/checks") && r.Method == http.MethodGet {
+		if denyIfUnauthorized(w, r, "technician") { return }
 		handleListChecks(w, r)
 	} else if strings.HasSuffix(path, "/checks") && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleCreateCheck(w, r)
 	} else {
 		http.NotFound(w, r)
@@ -1876,8 +1907,10 @@ func handleNoteRoutes(w http.ResponseWriter, r *http.Request) {
 	noteID := parts[0]
 
 	if len(parts) == 1 && r.Method == http.MethodPut {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleUpdateNote(w, r, noteID)
 	} else if len(parts) == 1 && r.Method == http.MethodDelete {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleDeleteNote(w, r, noteID)
 	} else {
 		http.NotFound(w, r)
@@ -2265,10 +2298,13 @@ func handleCheckRoutes(w http.ResponseWriter, r *http.Request) {
 	checkID := parts[0]
 
 	if len(parts) == 1 && r.Method == http.MethodPut {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleUpdateCheck(w, r, checkID)
 	} else if len(parts) == 1 && r.Method == http.MethodDelete {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleDeleteCheck(w, r, checkID)
 	} else if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
+		if denyIfUnauthorized(w, r, "admin") { return }
 		handleRunCheck(w, r, checkID)
 	} else {
 		http.NotFound(w, r)
