@@ -846,6 +846,15 @@ func scanInstalledPatches() []PatchItem {
 			}
 		}
 
+		// Skip entries without KB ID — these are driver/firmware/Store updates,
+		// not traditional Windows patches. They lack KB identifiers and would
+		// appear as orphaned entries in patch management.
+		if kbs == "" {
+			log.Printf("patches: skipped entry without KB: %s", title)
+			item.Release()
+			continue
+		}
+
 		dateStr := ""
 		if dateProp != nil && dateProp.VT == ole.VT_DATE {
 			dateStr = dateProp.ToString()
