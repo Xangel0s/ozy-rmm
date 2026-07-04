@@ -116,7 +116,7 @@ No bloquea producción pero debe resolverse antes de escalar.
 
 | Área | Estado | Preguntas a resolver |
 |------|--------|----------------------|
-| **Alerting real** | ✅ Parcial | Motor de alertas existe: CPU ≥ 90% con dedup (10 min). NO hay thresholds de RAM ni disco. Motor limitado a CPU-only. |
+| **Alerting real** | ✅ Completo | Motor de alertas: CPU ≥ 90%, RAM < 10% free, Disk < 10% free. Todos con dedup (10 min). |
 | **Backup jobs** | ⚠️ Mock | Tabla `backup_jobs` tiene seed data hardcodeado (status: completed falso). Agent tiene Kopia sidecar pero no se invoca automáticamente. No hay scheduler real. |
 | **Onboarding de agentes** | ✅ Parcial | Tabla `registration_tokens` existe. ¿Flujo de instalación documentado? ¿Rotación de tokens? ¿Expiración? |
 | **RBAC / permisos granulares** | ✅ Implementado | 3 roles: admin, technician, agent. `denyIfUnauthorized()` aplica en todos los endpoints. Viewer postergado. |

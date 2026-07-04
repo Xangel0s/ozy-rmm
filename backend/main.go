@@ -794,6 +794,48 @@ func saveTelemetry(agentID string, t TelemetryPayload) {
 				fmt.Sprintf("CPU usage critical: %.0f%% on %s", t.CPULoad, t.Hostname), fingerprint)
 		}
 	}
+
+	// RAM alert: less than 10% free
+	if t.TotalRAM > 0 {
+		ramFreePercent := float64(t.FreeRAM) / float64(t.TotalRAM) * 100
+		if ramFreePercent < 10 {
+			fingerprint := fmt.Sprintf("ram-high-%s", agentID)
+			var recentCount int
+			db.QueryRow(`
+				SELECT COUNT(*) FROM alerts
+				WHERE fingerprint = $1 AND created_at > NOW() - INTERVAL '10 minutes'
+			`, fingerprint).Scan(&recentCount)
+
+			if recentCount == 0 {
+				var tenantID string
+				db.QueryRow(`SELECT tenant_id FROM agents WHERE id = $1`, agentID).Scan(&tenantID)
+				freeGB := float64(t.FreeRAM) / 1048576
+				saveAlert(tenantID, agentID, "warning",
+					fmt.Sprintf("RAM usage critical: %.0f%% free (%.1f GB) on %s", ramFreePercent, freeGB, t.Hostname), fingerprint)
+			}
+		}
+	}
+
+	// Disk alert: less than 10% free
+	if t.DiskTotal > 0 {
+		diskFreePercent := float64(t.DiskFree) / float64(t.DiskTotal) * 100
+		if diskFreePercent < 10 {
+			fingerprint := fmt.Sprintf("disk-high-%s", agentID)
+			var recentCount int
+			db.QueryRow(`
+				SELECT COUNT(*) FROM alerts
+				WHERE fingerprint = $1 AND created_at > NOW() - INTERVAL '10 minutes'
+			`, fingerprint).Scan(&recentCount)
+
+			if recentCount == 0 {
+				var tenantID string
+				db.QueryRow(`SELECT tenant_id FROM agents WHERE id = $1`, agentID).Scan(&tenantID)
+				freeGB := float64(t.DiskFree) / 1073741824
+				saveAlert(tenantID, agentID, "warning",
+					fmt.Sprintf("Disk usage critical: %.0f%% free (%.1f GB) on %s", diskFreePercent, freeGB, t.Hostname), fingerprint)
+			}
+		}
+	}
 }
 
 func saveAlert(tenantID, agentID, severity, message, fingerprint string) {
