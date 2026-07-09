@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,13 +15,18 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"database/sql"
+	"net/http"
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
 	"github.com/gorilla/websocket"
 	"github.com/yusufpapurcu/wmi"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	_ "modernc.org/sqlite"
@@ -127,8 +133,9 @@ type SoftwareItem struct {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 var agentID = "windows-client-dev"
-var backendAddr = "localhost:8080"
+var backendAddr = "127.0.0.1:8080"
 var agentVersion = "1.2.0"
+var agentJWT = ""
 
 const AGENT_VERSION = "1.2.0"
 
@@ -167,6 +174,15 @@ func (m *agentService) Execute(args []string, r <-chan svc.ChangeRequest, change
 
 var localDB *sql.DB
 
+// ─── Remote Screen State ──────────────────────────────────────────────────────
+
+var (
+	screenCancel  context.CancelFunc
+	screenMu      sync.Mutex
+)
+
+// ─── Local SQLite Queue ──────────────────────────────────────────────────────
+
 func initLocalDB() {
 	dbDir := "C:\\ProgramData\\OzyShield"
 	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
@@ -185,6 +201,13 @@ func initLocalDB() {
 		id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		payload    TEXT,
 		created_at TEXT
+	);
+	CREATE TABLE IF NOT EXISTS agent_credentials (
+		id         INTEGER PRIMARY KEY CHECK (id = 1),
+		agent_id   TEXT NOT NULL,
+		tenant_id  TEXT NOT NULL,
+		jwt_token  TEXT NOT NULL,
+		created_at TEXT NOT NULL
 	);`
 	if _, err := localDB.Exec(schema); err != nil {
 		log.Fatalf("Failed to create local schema: %v", err)
@@ -200,6 +223,77 @@ func queueTelemetryOffline(payload string) {
 	} else {
 		log.Println("WS offline. Telemetry queued locally in SQLite.")
 	}
+}
+
+type enrollResponse struct {
+	AgentID  string `json:"agentId"`
+	TenantID string `json:"tenantId"`
+	Token    string `json:"token"`
+}
+
+func loadCredentials() (agentID, tenantID, jwt string, ok bool) {
+	var a, t, j string
+	err := localDB.QueryRow(`SELECT agent_id, tenant_id, jwt_token FROM agent_credentials WHERE id = 1`).Scan(&a, &t, &j)
+	if err != nil {
+		return "", "", "", false
+	}
+	return a, t, j, true
+}
+
+func saveCredentials(agentID, tenantID, jwt string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := localDB.Exec(`
+		INSERT INTO agent_credentials (id, agent_id, tenant_id, jwt_token, created_at)
+		VALUES (1, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET
+			agent_id = EXCLUDED.agent_id,
+			tenant_id = EXCLUDED.tenant_id,
+			jwt_token = EXCLUDED.jwt_token,
+			created_at = EXCLUDED.created_at
+	`, agentID, tenantID, jwt, now)
+	return err
+}
+
+func enrollWithToken(enrollToken string) error {
+	info := collectTelemetry()
+	body, err := json.Marshal(map[string]interface{}{
+		"token": enrollToken,
+		"info":  info,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal enroll payload: %w", err)
+	}
+
+	enrollURL := "http://" + backendAddr + "/api/enroll"
+	req, err := http.NewRequest(http.MethodPost, enrollURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to build enroll request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("enroll request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("enroll returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var er enrollResponse
+	if err := json.Unmarshal(respBody, &er); err != nil {
+		return fmt.Errorf("failed to parse enroll response: %w", err)
+	}
+
+	if err := saveCredentials(er.AgentID, er.TenantID, er.Token); err != nil {
+		return fmt.Errorf("failed to persist credentials: %w", err)
+	}
+
+	log.Printf("Enrolled successfully. agent_id=%s tenant_id=%s", er.AgentID, er.TenantID)
+	return nil
 }
 
 func flushOfflineTelemetry(conn *websocket.Conn) {
@@ -290,20 +384,38 @@ func getMACAddress() string {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	if envID := os.Getenv("AGENT_ID"); envID != "" {
-		agentID = envID
-	}
 	if envBackend := os.Getenv("BACKEND_URL"); envBackend != "" {
-		backendAddr = envBackend
+		backendAddr = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(envBackend, "https://"), "http://"))
 	}
 	if envVersion := os.Getenv("AGENT_VERSION"); envVersion != "" {
 		agentVersion = envVersion
 	}
 
 	hostname, _ := os.Hostname()
-	log.Printf("Starting agent v%s on %s (%s) [ID: %s, Backend: %s]", AGENT_VERSION, hostname, runtime.GOOS, agentID, backendAddr)
+	log.Printf("Starting agent v%s on %s (%s) [Backend: %s]", AGENT_VERSION, hostname, runtime.GOOS, backendAddr)
 
 	initLocalDB()
+
+	if id, _, jwt, ok := loadCredentials(); ok {
+		agentID = id
+		agentJWT = jwt
+		log.Printf("Loaded credentials from local DB. agent_id=%s", agentID)
+	} else {
+		enrollToken := os.Getenv("ENROLL_TOKEN")
+		if enrollToken == "" {
+			log.Fatal("ENROLL_TOKEN environment variable is required for first run")
+		}
+		if envID := os.Getenv("AGENT_ID"); envID != "" {
+			agentID = envID
+		}
+		log.Printf("No local credentials found. Enrolling with backend...")
+		if err := enrollWithToken(enrollToken); err != nil {
+			log.Fatalf("Enrollment failed: %v", err)
+		}
+		id, _, jwt, _ := loadCredentials()
+		agentID = id
+		agentJWT = jwt
+	}
 
 	isService, err := svc.IsWindowsService()
 	if err != nil {
@@ -329,8 +441,8 @@ func runAgentLoop(shutdownChan chan struct{}) {
 		default:
 		}
 
-		u := url.URL{Scheme: "ws", Host: backendAddr, Path: "/agent/connect", RawQuery: "id=" + agentID}
-		log.Printf("Connecting to %s", u.String())
+		u := url.URL{Scheme: "ws", Host: backendAddr, Path: "/agent/connect", RawQuery: "token=" + agentJWT}
+		log.Printf("Connecting to %s/agent/connect (agent_id=%s)", "ws://"+backendAddr, agentID)
 
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {
@@ -357,14 +469,41 @@ func runAgentLoop(shutdownChan chan struct{}) {
 			close(connDone)
 		}()
 
-		select {
-		case <-shutdownChan:
-			log.Println("Shutdown signal received while connected. Closing connection...")
-			conn.Close()
-			<-connDone
-			return
-		case <-connDone:
-			conn.Close()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		telemetrySent := false
+
+	loop:
+		for {
+			select {
+			case <-shutdownChan:
+				log.Println("Shutdown signal received while connected. Closing connection...")
+				conn.Close()
+				<-connDone
+				return
+			case <-connDone:
+				conn.Close()
+				break loop
+			case <-ticker.C:
+				data := collectTelemetry()
+				payloadBytes, err := json.Marshal(data)
+				if err != nil {
+					log.Printf("Failed to marshal telemetry: %v", err)
+					continue
+				}
+				msg := Message{AgentID: agentID, Type: "telemetry", Payload: string(payloadBytes)}
+				msgBytes, err := json.Marshal(msg)
+				if err != nil {
+					log.Printf("Failed to wrap telemetry message: %v", err)
+					continue
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+					log.Printf("Failed to send telemetry: %v", err)
+				} else if !telemetrySent {
+					log.Println("Initial telemetry sent.")
+					telemetrySent = true
+				}
+			}
 		}
 
 		log.Println("Disconnected from Backend. Retrying in 5 seconds...")
@@ -407,6 +546,7 @@ func handleConnection(conn *websocket.Conn) {
 
 	var cmd *exec.Cmd
 	var stdin io.WriteCloser
+	var termJob windows.Handle
 
 	defer func() {
 		if cmd != nil && cmd.Process != nil {
@@ -435,40 +575,55 @@ func handleConnection(conn *websocket.Conn) {
 					shell = "sh"
 				}
 
+				// Use the same Job Object + CREATE_SUSPENDED pattern as scripts.
+				// This ensures any child process the shell creates (cmd, ping,
+				// etc.) is killed when the session ends — same protection, same
+				// AppX exception documented in scripts.
 				cmd = exec.Command(shell)
+				termJob = setupJobObject(cmd)
 				var err error
 				stdin, err = cmd.StdinPipe()
 				if err != nil {
-					log.Printf("Failed to create stdin pipe: %v", err)
+					log.Printf("terminal: stdin pipe failed: %v", err)
 					cmd = nil
 					continue
 				}
-
 				stdout, err := cmd.StdoutPipe()
 				if err != nil {
-					log.Printf("Failed to create stdout pipe: %v", err)
+					log.Printf("terminal: stdout pipe failed: %v", err)
+					cmd = nil
+					continue
+				}
+				stderr, err := cmd.StderrPipe()
+				if err != nil {
+					log.Printf("terminal: stderr pipe failed: %v", err)
 					cmd = nil
 					continue
 				}
 
-				stderr, err := cmd.StderrPipe()
-				if err != nil {
-					log.Printf("Failed to create stderr pipe: %v", err)
+				if err := cmd.Start(); err != nil {
+					log.Printf("terminal: start failed: %v", err)
 					cmd = nil
 					continue
+				}
+				if termJob != 0 {
+					attachJob(termJob, cmd.Process.Pid)
 				}
 
 				go pipeReader(stdout, conn)
 				go pipeReader(stderr, conn)
 
-				if err := cmd.Start(); err != nil {
-					log.Printf("Failed to start shell: %v", err)
-					cmd = nil
-					continue
-				}
-
+				// Cleanup: wait for shell to exit, then release Job Object.
+				// terminal_closed kills the shell first, which makes
+				// cmd.Wait() return, which lets this goroutine clean up.
 				go func() {
 					cmd.Wait()
+					log.Printf("terminal: cmd.Wait() returned, termJob=%d", termJob)
+					if termJob != 0 {
+						windows.TerminateJobObject(termJob, 1)
+						windows.CloseHandle(termJob)
+						termJob = 0
+					}
 					cmd = nil
 					stdin = nil
 				}()
@@ -478,9 +633,33 @@ func handleConnection(conn *websocket.Conn) {
 				_, _ = stdin.Write([]byte(msg.Payload))
 			}
 
+		case "terminal_closed":
+			log.Printf("terminal: received terminal_closed from backend")
+			if termJob != 0 {
+				log.Printf("terminal: TerminateJobObject(%d)", termJob)
+				err := windows.TerminateJobObject(termJob, 1)
+				log.Printf("terminal: TerminateJobObject result: %v", err)
+			} else {
+				log.Printf("terminal: termJob is 0, nothing to kill")
+			}
+			if cmd != nil {
+				cmd.Process.Kill()
+			}
+			if stdin != nil {
+				stdin.Close()
+			}
+
 		case "backup_command":
 			log.Printf("Received backup command: %s", msg.Payload)
 			go executeBackupSidecar(conn, msg.Payload)
+
+		case "list_snapshots":
+			log.Printf("Received list_snapshots command: %s", msg.Payload)
+			go listSnapshotsSidecar(conn, msg.Payload)
+
+		case "restore_command":
+			log.Printf("Received restore command: %s", msg.Payload)
+			go executeRestoreSidecar(conn, msg.Payload)
 
 		case "scan_software":
 			log.Printf("Received software scan request")
@@ -505,6 +684,73 @@ func handleConnection(conn *websocket.Conn) {
 		case "software_uninstall_command":
 			log.Printf("Received software uninstall command: %s", msg.Payload)
 			go executeSoftwareUninstall(conn, msg.Payload)
+
+		case "script_command":
+			log.Printf("Received script command: %s", msg.Payload)
+			go executeScript(conn, msg.Payload)
+
+		case "screen_start":
+			log.Printf("screen: starting capture")
+
+			screenMu.Lock()
+			if screenCancel != nil {
+				screenCancel()
+			}
+			var ctx context.Context
+			ctx, screenCancel = context.WithCancel(context.Background())
+			screenMu.Unlock()
+
+			var cfg struct {
+				Quality int `json:"quality"`
+				FPS     int `json:"fps"`
+			}
+			json.Unmarshal([]byte(msg.Payload), &cfg)
+			if cfg.Quality <= 0 {
+				cfg.Quality = 50
+			}
+			if cfg.FPS <= 0 {
+				cfg.FPS = 5
+			}
+
+			go func() {
+				frameInterval := time.Second / time.Duration(cfg.FPS)
+				ticker := time.NewTicker(frameInterval)
+				defer ticker.Stop()
+
+				// Send first frame immediately
+				if data, err := captureScreenJPEG(cfg.Quality); err == nil {
+					encoded := base64.StdEncoding.EncodeToString(data)
+					sendWSMsg(conn, "screen_frame", encoded)
+				}
+
+				for {
+					select {
+					case <-ctx.Done():
+						log.Printf("screen: capture stopped")
+						return
+					case <-ticker.C:
+						data, err := captureScreenJPEG(cfg.Quality)
+						if err != nil {
+							log.Printf("screen: capture error: %v", err)
+							continue
+						}
+						encoded := base64.StdEncoding.EncodeToString(data)
+						sendWSMsg(conn, "screen_frame", encoded)
+					}
+				}
+			}()
+
+		case "screen_stop":
+			log.Printf("screen: stopping capture")
+			screenMu.Lock()
+			if screenCancel != nil {
+				screenCancel()
+				screenCancel = nil
+			}
+			screenMu.Unlock()
+
+		case "screen_input":
+			handleScreenInput(msg.Payload)
 		}
 	}
 }
@@ -983,11 +1229,12 @@ func executeCheck(conn *websocket.Conn, payload string) {
 // ─── Backup Sidecar (Kopia) ──────────────────────────────────────────────────
 
 type BackupJobConfig struct {
-	JobID       string   `json:"job_id"`
-	SourcePaths []string `json:"source_paths"`
-	RepoURL     string   `json:"repo_url"`
+	JobID       int64    `json:"jobId"`
+	SourcePaths []string `json:"sourcePaths"`
+	JobType     string   `json:"jobType"`
+	RepoURL     string   `json:"repoUrl"`
 	Password    string   `json:"password"`
-	TimeoutMin  int      `json:"timeout_min"`
+	TimeoutMin  int      `json:"timeoutMin"`
 }
 
 func executeBackupSidecar(conn *websocket.Conn, payload string) {
@@ -1024,12 +1271,20 @@ func executeBackupSidecar(conn *websocket.Conn, payload string) {
 			"--json",
 		}
 		cmd := exec.CommandContext(ctx, kopiaPath, connectArgs...)
-		cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+job.Password)
+		if job.Password != "" {
+			cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+job.Password)
+		}
 
 		var errBuf bytes.Buffer
 		cmd.Stderr = &errBuf
 		if err := cmd.Run(); err != nil {
 			sendWSMsg(conn, "backup_status", fmt.Sprintf("ERROR: Failed to connect to repository: %v | %s", err, errBuf.String()))
+			resultPayload, _ := json.Marshal(map[string]interface{}{
+				"jobId":  job.JobID,
+				"status": "failed",
+				"error":  errBuf.String(),
+			})
+			sendWSMsg(conn, "backup_result", string(resultPayload))
 			return
 		}
 		sendWSMsg(conn, "backup_status", "Repository connected successfully.")
@@ -1044,7 +1299,9 @@ func executeBackupSidecar(conn *websocket.Conn, payload string) {
 	args = append(args, job.SourcePaths...)
 
 	cmd := exec.CommandContext(ctx, kopiaPath, args...)
-	cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+job.Password)
+	if job.Password != "" {
+		cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+job.Password)
+	}
 
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -1054,21 +1311,196 @@ func executeBackupSidecar(conn *websocket.Conn, payload string) {
 
 	if ctx.Err() == context.DeadlineExceeded {
 		sendWSMsg(conn, "backup_status", fmt.Sprintf("ERROR: Backup timed out after %d minutes", job.TimeoutMin))
+		resultPayload, _ := json.Marshal(map[string]interface{}{
+			"jobId":  job.JobID,
+			"status": "failed",
+			"error":  "backup timed out",
+		})
+		sendWSMsg(conn, "backup_result", string(resultPayload))
 		return
 	}
 
 	if err != nil {
 		sendWSMsg(conn, "backup_status", fmt.Sprintf("ERROR: Backup failed: %v | %s", err, errBuf.String()))
+		resultPayload, _ := json.Marshal(map[string]interface{}{
+			"jobId":  job.JobID,
+			"status": "failed",
+			"error":  errBuf.String(),
+		})
+		sendWSMsg(conn, "backup_result", string(resultPayload))
 		return
 	}
 
 	// Parse Kopia JSON output for snapshot info
+	snapshotID, sizeBytes := parseKopiaResult(outBuf.Bytes())
 	snapshotInfo := parseKopiaOutput(outBuf.Bytes())
 	if snapshotInfo != "" {
 		sendWSMsg(conn, "backup_status", fmt.Sprintf("SUCCESS: %s", snapshotInfo))
 	} else {
 		sendWSMsg(conn, "backup_status", "SUCCESS: Backup completed. Snapshot created.")
 	}
+
+	resultPayload, _ := json.Marshal(map[string]interface{}{
+		"jobId":      job.JobID,
+		"status":     "completed",
+		"sizeBytes":  sizeBytes,
+		"snapshotId": snapshotID,
+		"error":      "",
+	})
+	sendWSMsg(conn, "backup_result", string(resultPayload))
+}
+
+// ─── Snapshot Listing ─────────────────────────────────────────────────────────
+
+type SnapshotListReq struct {
+	RepoURL    string `json:"repoUrl"`
+	Password   string `json:"password"`
+	TimeoutMin int    `json:"timeoutMin"`
+}
+
+func listSnapshotsSidecar(conn *websocket.Conn, payload string) {
+	var req SnapshotListReq
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		sendWSMsg(conn, "snapshot_list", fmt.Sprintf(`{"error":"invalid payload: %v"}`, err))
+		return
+	}
+	if req.TimeoutMin <= 0 {
+		req.TimeoutMin = 2
+	}
+
+	sendWSMsg(conn, "restore_status", "Finding backup engine...")
+	kopiaPath := findKopiaBinary()
+	if kopiaPath == "" {
+		sendWSMsg(conn, "snapshot_list", `{"error":"Kopia binary not found"}`)
+		return
+	}
+
+	if req.RepoURL != "" {
+		sendWSMsg(conn, "restore_status", "Connecting to repository...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		connectArgs := []string{"repository", "connect", req.RepoURL, "--json"}
+		cmd := exec.CommandContext(ctx, kopiaPath, connectArgs...)
+		if req.Password != "" {
+			cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+req.Password)
+		}
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		if err := cmd.Run(); err != nil {
+			sendWSMsg(conn, "snapshot_list", fmt.Sprintf(`{"error":"repo connect failed: %s"}`, errBuf.String()))
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutMin)*time.Minute)
+	defer cancel()
+
+	args := []string{"snapshot", "list", "--json"}
+	cmd := exec.CommandContext(ctx, kopiaPath, args...)
+	if req.Password != "" {
+		cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+req.Password)
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Run(); err != nil {
+		sendWSMsg(conn, "snapshot_list", fmt.Sprintf(`{"error":"%s"}`, errBuf.String()))
+		return
+	}
+
+	sendWSMsg(conn, "snapshot_list", string(outBuf.Bytes()))
+}
+
+// ─── Restore ──────────────────────────────────────────────────────────────────
+
+type RestoreReq struct {
+	SnapshotID  string `json:"snapshotId"`
+	Destination string `json:"destination"`
+	RepoURL     string `json:"repoUrl"`
+	Password    string `json:"password"`
+	TimeoutMin  int    `json:"timeoutMin"`
+}
+
+type RestoreProgress struct {
+	SnapshotID  string `json:"snapshotId"`
+	Destination string `json:"destination"`
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	Error       string `json:"error,omitempty"`
+}
+
+func executeRestoreSidecar(conn *websocket.Conn, payload string) {
+	var req RestoreReq
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"error":"invalid payload: %v"}`, err))
+		return
+	}
+	if req.SnapshotID == "" || req.Destination == "" {
+		sendWSMsg(conn, "restore_result", `{"error":"snapshotId and destination required"}`)
+		return
+	}
+	if req.TimeoutMin <= 0 {
+		req.TimeoutMin = 30
+	}
+
+	progress := func(status, msg string) {
+		p := RestoreProgress{SnapshotID: req.SnapshotID, Destination: req.Destination, Status: status, Message: msg}
+		b, _ := json.Marshal(p)
+		sendWSMsg(conn, "restore_status", string(b))
+	}
+
+	progress("running", "Finding backup engine...")
+	kopiaPath := findKopiaBinary()
+	if kopiaPath == "" {
+		sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"snapshotId":"%s","status":"failed","error":"Kopia binary not found"}`, req.SnapshotID))
+		return
+	}
+
+	if req.RepoURL != "" {
+		progress("running", "Connecting to repository...")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		connectArgs := []string{"repository", "connect", req.RepoURL, "--json"}
+		cmd := exec.CommandContext(ctx, kopiaPath, connectArgs...)
+		if req.Password != "" {
+			cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+req.Password)
+		}
+		var errBuf bytes.Buffer
+		cmd.Stderr = &errBuf
+		if err := cmd.Run(); err != nil {
+			sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"snapshotId":"%s","status":"failed","error":"repo connect failed: %s"}`, req.SnapshotID, errBuf.String()))
+			return
+		}
+	}
+
+	progress("running", fmt.Sprintf("Restoring snapshot %s to %s...", req.SnapshotID, req.Destination))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutMin)*time.Minute)
+	defer cancel()
+
+	args := []string{"restore", req.SnapshotID, req.Destination, "--json"}
+	cmd := exec.CommandContext(ctx, kopiaPath, args...)
+	if req.Password != "" {
+		cmd.Env = append(cmd.Environ(), "KOPIA_PASSWORD="+req.Password)
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"snapshotId":"%s","status":"failed","error":"restore timed out after %d minutes"}`, req.SnapshotID, req.TimeoutMin))
+		return
+	}
+	if err != nil {
+		sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"snapshotId":"%s","status":"failed","error":"%s"}`, req.SnapshotID, errBuf.String()))
+		return
+	}
+
+	progress("completed", fmt.Sprintf("Restore completed to %s", req.Destination))
+	sendWSMsg(conn, "restore_result", fmt.Sprintf(`{"snapshotId":"%s","status":"completed","destination":"%s"}`, req.SnapshotID, req.Destination))
 }
 
 func findKopiaBinary() string {
@@ -1093,22 +1525,37 @@ func findKopiaBinary() string {
 	return ""
 }
 
+func parseKopiaResult(data []byte) (snapshotID string, sizeBytes int64) {
+	var result struct {
+		ID        string `json:"id"`
+		RootEntry struct {
+			Summary struct {
+				TotalFileSize int64 `json:"size"`
+			} `json:"summ"`
+		} `json:"rootEntry"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", 0
+	}
+	return result.ID, result.RootEntry.Summary.TotalFileSize
+}
+
 func parseKopiaOutput(data []byte) string {
 	var result struct {
-		SnapshotID string `json:"snapshotId"`
-		Hash       string `json:"hash"`
-		RootID     string `json:"rootId"`
-		Size       struct {
-			TotalBytes int64 `json:"totalBytes"`
-		} `json:"size"`
+		ID        string `json:"id"`
+		RootEntry struct {
+			Summary struct {
+				TotalFileSize int64 `json:"size"`
+			} `json:"summ"`
+		} `json:"rootEntry"`
 	}
 
 	if err := json.Unmarshal(data, &result); err != nil {
 		return ""
 	}
 
-	if result.Hash != "" {
-		return fmt.Sprintf("Snapshot %s created (hash: %s)", result.SnapshotID, result.Hash[:min(12, len(result.Hash))])
+	if result.ID != "" {
+		return fmt.Sprintf("Snapshot %s created (%d bytes)", result.ID, result.RootEntry.Summary.TotalFileSize)
 	}
 	return ""
 }
@@ -1149,6 +1596,236 @@ func executeSoftwareUninstall(conn *websocket.Conn, payload string) {
 	log.Printf("Uninstall completed for %s", req.SoftwareName)
 	sendWSMsg(conn, "software_uninstall_result", fmt.Sprintf(`{"status":"completed","softwareId":"%s","name":"%s","output":"%s"}`,
 		req.SoftwareID, req.SoftwareName, string(output)))
+}
+
+func executeScript(conn *websocket.Conn, payload string) {
+	var req struct {
+		ScriptID       int64  `json:"scriptId"`
+		ExecutionID    int64  `json:"executionId"`
+		Command        string `json:"command"`
+		Language       string `json:"language"`
+		TimeoutSeconds int    `json:"timeoutSeconds"`
+		MaxOutputBytes int    `json:"maxOutputBytes"`
+	}
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		sendWSMsg(conn, "script_result", fmt.Sprintf(`{"executionId":0,"status":"failed","error":"invalid payload: %v"}`, err))
+		return
+	}
+	log.Printf("Executing script %d (execution %d, language=%s)", req.ScriptID, req.ExecutionID, req.Language)
+
+	timeout := 300
+	if req.TimeoutSeconds > 0 {
+		timeout = req.TimeoutSeconds
+	}
+	maxOutput := 65536
+	if req.MaxOutputBytes > 0 {
+		maxOutput = req.MaxOutputBytes
+	}
+
+	shell := "powershell.exe"
+	shellArg := "-Command"
+	if req.Language == "batch" {
+		shell = "cmd.exe"
+		shellArg = "/C"
+	} else if req.Language == "sh" && runtime.GOOS != "windows" {
+		shell = "sh"
+		shellArg = "-c"
+	}
+
+	// Force Start-Process to use CreateProcess (not ShellExecuteEx)
+	// so child processes are created inside the Job Object.
+	command := req.Command
+	if shell == "powershell.exe" {
+		command = "$PSDefaultParameterValues['Start-Process:UseShellExecute']=$false; " + command
+	}
+
+	logID := fmt.Sprintf("script_%d_exec_%d", req.ScriptID, req.ExecutionID)
+
+	cmd := exec.Command(shell, shellArg, command)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	job := setupJobObject(cmd)
+	if job != 0 {
+		log.Printf("script_exec: job created for %s", logID)
+	}
+
+	start := time.Now()
+	err := cmd.Start()
+	if err == nil && job != 0 {
+		if attachJob(job, cmd.Process.Pid) {
+			log.Printf("script_exec: process %d assigned to job for %s", cmd.Process.Pid, logID)
+		}
+	}
+
+	var durationMs int
+	var waitErr error
+	if err == nil {
+		var timedOut bool
+		durationMs, timedOut, waitErr = waitAndKillOnTimeout(cmd, job, time.Duration(timeout)*time.Second, logID)
+		if timedOut {
+			sendWSMsg(conn, "script_result", fmt.Sprintf(`{"executionId":%d,"status":"timeout","exitCode":-1,"output":"","outputTruncated":false,"durationMs":%d,"error":"execution timed out after %ds"}`,
+				req.ExecutionID, durationMs, timeout))
+			log.Printf("script_exec: %s timed out after %dms", logID, durationMs)
+			return
+		}
+	} else {
+		durationMs = int(time.Since(start).Milliseconds())
+		sendWSMsg(conn, "script_result", fmt.Sprintf(`{"executionId":%d,"status":"failed","exitCode":1,"output":"","outputTruncated":false,"durationMs":%d,"error":"start failed: %v"}`,
+			req.ExecutionID, durationMs, err))
+		return
+	}
+
+	output := stdoutBuf.String()
+	if stderrBuf.Len() > 0 {
+		if output != "" {
+			output += "\n--- STDERR ---\n"
+		}
+		output += stderrBuf.String()
+	}
+
+	outputTruncated := len(output) > maxOutput
+	if outputTruncated {
+		output = output[:maxOutput] + "\n... [truncated]"
+	}
+
+	exitCode := 0
+	if waitErr != nil {
+		exitCode = 1
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	status := "completed"
+	if exitCode != 0 {
+		status = "failed"
+	}
+
+	resultPayload, _ := json.Marshal(map[string]interface{}{
+		"executionId":     req.ExecutionID,
+		"status":          status,
+		"exitCode":        exitCode,
+		"output":          output,
+		"outputTruncated": outputTruncated,
+		"durationMs":      durationMs,
+		"error":           "",
+	})
+	sendWSMsg(conn, "script_result", string(resultPayload))
+	log.Printf("Script %d execution %d completed: status=%s, exitCode=%d, duration=%dms, truncated=%v",
+		req.ScriptID, req.ExecutionID, status, exitCode, durationMs, outputTruncated)
+}
+
+// setupJobObject creates a Windows Job Object, sets KILL_ON_JOB_CLOSE,
+// and configures the command to start suspended (so the process can be
+// assigned to the job before its first instruction runs).
+// Returns 0 on non-Windows or if creation fails.
+func setupJobObject(cmd *exec.Cmd) windows.Handle {
+	if runtime.GOOS != "windows" {
+		return 0
+	}
+	job, _ := windows.CreateJobObject(nil, nil)
+	if job == 0 {
+		return 0
+	}
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+		},
+	}
+	windows.SetInformationJobObject(
+		job,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x00000004, // CREATE_SUSPENDED
+	}
+	return job
+}
+
+// attachJob assigns pid to the Job Object and resumes its main thread.
+// Must be called immediately after cmd.Start().
+func attachJob(job windows.Handle, pid int) bool {
+	if job == 0 || runtime.GOOS != "windows" {
+		return false
+	}
+	processHandle, err := windows.OpenProcess(
+		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_CREATE_PROCESS,
+		false, uint32(pid))
+	if err != nil {
+		log.Printf("job: OpenProcess(%d) failed: %v", pid, err)
+		return false
+	}
+	defer windows.CloseHandle(processHandle)
+	if err := windows.AssignProcessToJobObject(job, processHandle); err != nil {
+		log.Printf("job: AssignProcessToJobObject(%d) failed: %v", pid, err)
+		return false
+	}
+	resumeMainThread(pid)
+	return true
+}
+
+// waitAndKillOnTimeout waits for cmd to finish. If timeout elapses first,
+// it force-kills the main process and, if the main process doesn't die
+// within the drain window, terminates the entire Job Object tree.
+func waitAndKillOnTimeout(cmd *exec.Cmd, job windows.Handle, timeout time.Duration, logID string) (durationMs int, timedOut bool, waitErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case waitErr = <-done:
+	case <-ctx.Done():
+		log.Printf("job: timeout for %s, force-killing", logID)
+		cmd.Process.Kill()
+		select {
+		case waitErr = <-done:
+		case <-time.After(3 * time.Second):
+			log.Printf("job: drain timeout for %s, force-killing job tree", logID)
+		}
+		timedOut = true
+		if job != 0 {
+			windows.TerminateJobObject(job, 1)
+			windows.CloseHandle(job)
+		}
+	}
+	return int(time.Since(start).Milliseconds()), timedOut, waitErr
+}
+
+func resumeMainThread(pid int) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		log.Printf("script_exec: CreateToolhelp32Snapshot failed: %v", err)
+		return
+	}
+	defer windows.CloseHandle(snapshot)
+
+	var te windows.ThreadEntry32
+	te.Size = uint32(unsafe.Sizeof(te))
+	for err = windows.Thread32First(snapshot, &te); err == nil; err = windows.Thread32Next(snapshot, &te) {
+		if te.OwnerProcessID == uint32(pid) {
+			hThread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, te.ThreadID)
+			if err != nil {
+				log.Printf("script_exec: OpenThread(%d) failed: %v", te.ThreadID, err)
+				return
+			}
+			if _, err := windows.ResumeThread(hThread); err != nil {
+				log.Printf("script_exec: ResumeThread failed: %v", err)
+			}
+			windows.CloseHandle(hThread)
+			return
+		}
+	}
+	log.Printf("script_exec: no thread found for pid %d", pid)
 }
 
 func min(a, b int) int {

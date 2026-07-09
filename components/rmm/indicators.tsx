@@ -1,6 +1,6 @@
 import { AppWindow, Server, Terminal } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { osLabels, type DeviceStatus, type OS, type Severity } from "@/lib/rmm-data"
+import { osLabels, type DeviceStatus, type OS, type Severity } from "@/lib/types"
 
 export function StatusDot({ status }: { status: DeviceStatus }) {
   const map = {

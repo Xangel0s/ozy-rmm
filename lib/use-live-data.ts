@@ -3,12 +3,32 @@
 /**
  * lib/use-live-data.ts
  * React hooks that poll the Go backend and expose live data to the dashboard.
- * All hooks return stable empty arrays/objects while data is loading, so the
- * UI renders correctly on both the first paint and subsequent refreshes.
+ *
+ * Implementation: TanStack Query. Each hook declares a stable queryKey and a
+ * refetchInterval. The QueryClientProvider lives in app/providers.tsx.
+ *
+ * Returns a stable shape { data, loading, error } so existing components that
+ * previously used manual useEffect/setInterval polling keep working unchanged.
  */
 
-import * as React from "react"
-import { fetchAgents, fetchAlerts, fetchBackups, type AgentInfo, type AlertRow, type BackupJob } from "@/lib/api"
+import {
+  useQuery,
+  type UseQueryResult,
+} from "@tanstack/react-query"
+import {
+  fetchAgents,
+  fetchAlerts,
+  fetchBackups,
+  fetchTenants,
+  fetchUsers,
+  fetchAggregatedTelemetry,
+  type AgentInfo,
+  type AlertRow,
+  type BackupJob,
+  type Tenant,
+  type UserInfo,
+  type TelemetryBucket,
+} from "@/lib/api"
 
 export type { AlertRow } from "@/lib/api"
 export type { BackupJob } from "@/lib/api"
@@ -16,123 +36,153 @@ export type { BackupJob } from "@/lib/api"
 // ─── useAgents ────────────────────────────────────────────────────────────────
 
 /**
- * Polls /api/agents every `intervalMs` ms (default 5 s).
+ * Polls /api/agents every 5 s.
  * Returns { agents, loading, error }.
  */
-export function useAgents(intervalMs = 5000) {
-  const [agents, setAgents] = React.useState<AgentInfo[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
-
-  React.useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      try {
-        const data = await fetchAgents()
-        if (!cancelled) {
-          setAgents(data ?? [])
-          setError(null)
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e))
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-
-    load()
-    const id = setInterval(load, intervalMs)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [intervalMs])
-
-  return { agents, loading, error }
+export function useAgents(): {
+  agents: AgentInfo[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<AgentInfo[], Error> = useQuery({
+    queryKey: ["agents"],
+    queryFn: fetchAgents,
+    refetchInterval: 5_000,
+  })
+  return {
+    agents: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
 }
 
 // ─── useAlerts ────────────────────────────────────────────────────────────────
 
 /**
- * Polls /api/alerts every `intervalMs` ms (default 10 s).
+ * Polls /api/alerts every 10 s.
  * Returns { alerts, loading, error }.
  */
-export function useAlerts(intervalMs = 10000) {
-  const [alerts, setAlerts] = React.useState<AlertRow[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
-
-  React.useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      try {
-        const data = await fetchAlerts()
-        if (!cancelled) {
-          setAlerts(data ?? [])
-          setError(null)
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e))
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-
-    load()
-    const id = setInterval(load, intervalMs)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [intervalMs])
-
-  return { alerts, loading, error }
+export function useAlerts(): {
+  alerts: AlertRow[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<AlertRow[], Error> = useQuery({
+    queryKey: ["alerts"],
+    queryFn: fetchAlerts,
+    refetchInterval: 10_000,
+  })
+  return {
+    alerts: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
 }
 
 // ─── useBackups ───────────────────────────────────────────────────────────────
 
 /**
- * Polls /api/backups every `intervalMs` ms (default 15 s).
+ * Polls /api/backups every 15 s.
  * Returns { backups, loading, error }.
  */
-export function useBackups(intervalMs = 15000) {
-  const [backups, setBackups] = React.useState<BackupJob[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
+export function useBackups(): {
+  backups: BackupJob[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<BackupJob[], Error> = useQuery({
+    queryKey: ["backups"],
+    queryFn: fetchBackups,
+    refetchInterval: 15_000,
+  })
+  return {
+    backups: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
+}
 
-  React.useEffect(() => {
-    let cancelled = false
+// ─── useAgentTelemetry ───────────────────────────────────────────────────────────
 
-    async function load() {
-      try {
-        const data = await fetchBackups()
-        if (!cancelled) {
-          setBackups(data ?? [])
-          setError(null)
-        }
-      } catch (e) {
-        if (!cancelled) setError(String(e))
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
+/**
+ * Fetches aggregated telemetry for a specific agent over a time range.
+ * Polls every 30s. Interval can be 'hour', 'minute', or 'day'.
+ */
+export function useAgentTelemetry(
+  agentId: string | null,
+  from: string,
+  to: string,
+  interval: string,
+): {
+  buckets: TelemetryBucket[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<TelemetryBucket[], Error> = useQuery({
+    queryKey: ["agentTelemetry", agentId, from, to, interval],
+    queryFn: () => {
+      if (!agentId) return Promise.resolve([])
+      return fetchAggregatedTelemetry(agentId, from, to, interval)
+    },
+    enabled: !!agentId,
+    refetchInterval: 30_000,
+  })
+  return {
+    buckets: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
+}
 
-    load()
-    const id = setInterval(load, intervalMs)
-    return () => {
-      cancelled = true
-      clearInterval(id)
-    }
-  }, [intervalMs])
+// ─── useTenants ───────────────────────────────────────────────────────────────
 
-  return { backups, loading, error }
+/**
+ * Loads /api/tenants once (rarely changes). refetchInterval = 60 s.
+ * Returns { tenants, loading, error }.
+ */
+export function useTenants(): {
+  tenants: Tenant[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<Tenant[], Error> = useQuery({
+    queryKey: ["tenants"],
+    queryFn: fetchTenants,
+    refetchInterval: 60_000,
+  })
+  return {
+    tenants: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
+}
+
+// ─── useUsers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Loads /api/users every 30 s.
+ * Returns { users, loading, error }.
+ */
+export function useUsers(): {
+  users: UserInfo[]
+  loading: boolean
+  error: string | null
+} {
+  const q: UseQueryResult<UserInfo[], Error> = useQuery({
+    queryKey: ["users"],
+    queryFn: fetchUsers,
+    refetchInterval: 30_000,
+  })
+  return {
+    users: q.data ?? [],
+    loading: q.isLoading,
+    error: q.error ? String(q.error.message ?? q.error) : null,
+  }
 }
 
 // ─── agentToDevice ────────────────────────────────────────────────────────────
 
-import type { Device } from "@/lib/rmm-data"
+import type { Device } from "@/lib/types"
 
 /**
  * Converts an AgentInfo from the backend into the Device shape used throughout

@@ -44,8 +44,8 @@ export default function AlertsPage() {
   const [severity, setSeverity] = React.useState<"all" | Severity>("all")
   const [acknowledging, setAcknowledging] = React.useState<number | null>(null)
 
-  const { alerts: liveAlerts, loading } = useAlerts(10000)
-  const { agents } = useAgents(5000)
+  const { alerts: liveAlerts, loading } = useAlerts()
+  const { agents } = useAgents()
   const liveDevices = React.useMemo(() => agents.map(agentToDevice), [agents])
 
   const allAlerts = React.useMemo(() => liveAlerts.map(toDisplayAlert), [liveAlerts])

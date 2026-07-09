@@ -1,5 +1,6 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import {
@@ -20,8 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { tenants } from "@/lib/rmm-data"
-import { useAgents, useAlerts, useBackups } from "@/lib/use-live-data"
+import { useAgents, useAlerts, useBackups, useTenants } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
 import { logout, getCurrentUser } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -46,9 +46,11 @@ export function Sidebar({
   const router = useRouter()
 
   // Live counts from the backend — these replace the static mock values
-  const { agents } = useAgents(5000)
-  const { alerts: liveAlerts } = useAlerts(10000)
-  const { backups: liveBackups } = useBackups(15000)
+  const { agents } = useAgents()
+  const { alerts: liveAlerts } = useAlerts()
+  const { backups: liveBackups } = useBackups()
+  const { tenants: liveTenants } = useTenants()
+  const tenantOptions = liveTenants
 
   const criticalAlerts = liveAlerts.filter((a) => a.severity === "critical").length
   const runningBackups = liveBackups.filter((b) => b.status === "running").length
@@ -66,6 +68,20 @@ export function Sidebar({
     if (href === "/") return pathname === "/"
     return pathname === href || pathname.startsWith(`${href}/`)
   }
+
+  const [userInfo, setUserInfo] = useState<{ name: string; role: string; initials: string }>({
+    name: "User",
+    role: "technician",
+    initials: "U",
+  })
+
+  useEffect(() => {
+    const user = getCurrentUser()
+    const name = user?.fullName || user?.userId?.slice(0, 8) || "User"
+    const role = user?.role || "technician"
+    const initials = name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()
+    setUserInfo({ name, role, initials })
+  }, [])
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
@@ -88,16 +104,16 @@ export function Sidebar({
         <Select value={tenant} onValueChange={(v) => v && onTenantChange(v)}>
           <SelectTrigger className="w-full bg-secondary/60">
             <SelectValue>
-              {(value: string) => tenants.find((t) => t.id === value)?.name}
+              {(value: string) => tenantOptions.find((t) => t.id === value)?.name}
             </SelectValue>
             <ChevronsUpDown className="ml-auto size-3.5 text-muted-foreground" />
           </SelectTrigger>
           <SelectContent>
-            {tenants.map((t) => (
+            {tenantOptions.map((t) => (
               <SelectItem key={t.id} value={t.id}>
                 <span className="flex w-full items-center justify-between gap-3">
                   <span>{t.name}</span>
-                  <span className="text-xs text-muted-foreground">{t.devices}</span>
+                  <span className="text-xs text-muted-foreground">{t.deviceCount ?? 0}</span>
                 </span>
               </SelectItem>
             ))}
@@ -138,23 +154,13 @@ export function Sidebar({
 
       <div className="border-t border-sidebar-border p-3">
         <div className="flex items-center gap-3 rounded-md px-1 py-1">
-          {(() => {
-            const user = getCurrentUser()
-            const name = user?.fullName || user?.userId?.slice(0, 8) || "User"
-            const role = user?.role || "technician"
-            const initials = name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()
-            return (
-              <>
-                <div className="flex size-8 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground ring-1 ring-border">
-                  {initials}
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col leading-tight">
-                  <span className="truncate text-sm font-medium">{name}</span>
-                  <span className="truncate text-xs text-muted-foreground capitalize">{role}</span>
-                </div>
-              </>
-            )
-          })()}
+          <div className="flex size-8 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-foreground ring-1 ring-border">
+            {userInfo.initials}
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col leading-tight">
+            <span className="truncate text-sm font-medium">{userInfo.name}</span>
+            <span className="truncate text-xs text-muted-foreground capitalize">{userInfo.role}</span>
+          </div>
           <Button
             variant="ghost"
             size="icon"

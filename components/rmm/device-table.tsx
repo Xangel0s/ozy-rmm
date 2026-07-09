@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/table"
 import { OsIcon, StatusDot, UsageBar, usageTone } from "@/components/rmm/indicators"
 import { Sparkline } from "@/components/rmm/sparkline"
-import { osLabels, type Device } from "@/lib/rmm-data"
+import { osLabels, type Device } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 type SortKey = "name" | "tenant" | "status" | "cpu" | "ram" | "disk"
@@ -162,9 +162,7 @@ export function DeviceTable({
     }
 
     if (action === "terminal") {
-      toast.success(`Remote terminal requested for ${device.name}`, {
-        description: "Session provisioning started and will be available shortly.",
-      })
+      router.push(`/devices/${device.id}?tab=terminal`)
       return
     }
 

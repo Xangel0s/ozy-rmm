@@ -1,197 +1,91 @@
 "use client"
 
 import * as React from "react"
-import {
-  AlertTriangle,
-  Cpu,
-  HardDrive,
-  MemoryStick,
-  Network,
-  Server,
-  Monitor,
-} from "lucide-react"
-import { Badge } from "@/components/ui/badge"
 import { Card } from "@/components/ui/card"
-import type { DeviceSummary } from "./types"
+import { Badge } from "@/components/ui/badge"
+import { TelemetryChart } from "@/components/rmm/telemetry-chart"
+import { fetchAlertsByAgent, type AgentInfo, type AlertRow } from "@/lib/api"
 
-interface AlertItem {
-  id: number
-  agentId: string
-  severity: "critical" | "warning" | "info"
-  message: string
-  time: string
+function fmtBytes(bytes: number): string {
+  if (bytes === 0) return "0 B"
+  const k = 1024
+  const sizes = ["B", "KB", "MB", "GB", "TB"]
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+}
+
+function fmtPct(used: number, total: number): string {
+  if (total === 0) return "0%"
+  return `${Math.round((used / total) * 100)}%`
 }
 
 interface SummaryTabProps {
-  device: DeviceSummary;
-  recentAlerts?: AlertItem[];
-  backupsNotImplemented?: boolean;
+  agent: AgentInfo
 }
 
-export function SummaryTab({ device, recentAlerts = [], backupsNotImplemented }: SummaryTabProps) {
-  const ramUsed = device.totalRAM > 0
-    ? Math.round(((device.totalRAM - device.freeRam) / device.totalRAM) * 100)
-    : 0
+export function SummaryTab({ agent }: SummaryTabProps) {
+  const [alerts, setAlerts] = React.useState<AlertRow[]>([])
+
+  React.useEffect(() => {
+    fetchAlertsByAgent(agent.id, 5).then(setAlerts)
+  }, [agent.id])
+
+  const ramUsed = agent.totalRam - agent.freeRam
+  const diskUsed = agent.diskTotal - agent.diskFree
 
   return (
-    <div className="space-y-4">
-      {/* System Identity - High Density Profile */}
-      <Card className="gap-0 p-0">
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Server className="size-4 text-primary" />
-            <h2 className="text-sm font-semibold">System Identity</h2>
-          </div>
-          <Badge variant={device.status === "online" ? "default" : "secondary"} className="capitalize">
-            {device.status}
-          </Badge>
-        </div>
+    <div className="flex flex-col gap-4">
+      {/* CPU / RAM / Disk instant values */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Card className="p-4">
+          <p className="text-xs text-muted-foreground">CPU</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">
+            {Math.round(agent.cpuLoad)}%
+          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{agent.cpuModel}</p>
+        </Card>
+        <Card className="p-4">
+          <p className="text-xs text-muted-foreground">RAM</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">
+            {fmtPct(ramUsed, agent.totalRam)}
+          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {fmtBytes(ramUsed)} / {fmtBytes(agent.totalRam)}
+          </p>
+        </Card>
+        <Card className="p-4">
+          <p className="text-xs text-muted-foreground">Disk</p>
+          <p className="mt-1 text-2xl font-semibold tabular-nums">
+            {fmtPct(diskUsed, agent.diskTotal)}
+          </p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {fmtBytes(diskUsed)} / {fmtBytes(agent.diskTotal)}
+          </p>
+        </Card>
+      </div>
 
-        <div className="grid grid-cols-1 gap-6 p-4 md:grid-cols-2 lg:grid-cols-3">
-          {/* Column 1: OS & Software */}
-          <div className="space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Operating System</h3>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-xs text-muted-foreground">Hostname</span>
-                <span className="font-mono text-xs font-medium">{device.hostname}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-xs text-muted-foreground">OS</span>
-                <span className="text-xs font-medium">{device.os}</span>
-              </div>
-              {device.kernelVersion && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Kernel</span>
-                  <span className="font-mono text-xs">{device.kernelVersion}</span>
-                </div>
-              )}
-              {device.agentVersion && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Agent</span>
-                  <span className="font-mono text-xs text-muted-foreground">v{device.agentVersion}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Column 2: Hardware */}
-          <div className="space-y-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Hardware</h3>
-            <div className="space-y-2">
-              {device.vendor && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Vendor</span>
-                  <span className="text-xs font-medium">{device.vendor}</span>
-                </div>
-              )}
-              {device.model && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Model</span>
-                  <span className="text-xs font-medium">{device.model}</span>
-                </div>
-              )}
-              {device.serialNumber && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Serial</span>
-                  <span className="font-mono text-xs">{device.serialNumber}</span>
-                </div>
-              )}
-              {device.cpuModel && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">CPU</span>
-                  <span className="text-xs font-medium truncate max-w-[200px]" title={device.cpuModel}>{device.cpuModel}</span>
-                </div>
-              )}
-              {device.numCPU > 0 && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Cores</span>
-                  <span className="text-xs font-medium">{device.numCPU}</span>
-                </div>
-              )}
-              {device.gpuName && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">GPU</span>
-                  <span className="text-xs font-medium truncate max-w-[200px]" title={device.gpuName}>{device.gpuName}</span>
-                </div>
-              )}
-              {device.gpuDriver && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">GPU Driver</span>
-                  <span className="font-mono text-xs">{device.gpuDriver}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Column 3: Network */}
-          <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
-            <div className="flex items-center gap-2">
-              <Network className="size-4 text-purple-400" />
-              <h3 className="text-sm font-medium">Network</h3>
-            </div>
-            <div className="space-y-2">
-              {device.localIP && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Local IP</span>
-                  <span className="font-mono text-xs font-medium">{device.localIP}</span>
-                </div>
-              )}
-              {device.macAddress && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">MAC</span>
-                  <span className="font-mono text-[10px]">{device.macAddress}</span>
-                </div>
-              )}
-              {device.gateway && (
-                <div className="flex justify-between">
-                  <span className="text-xs text-muted-foreground">Gateway</span>
-                  <span className="font-mono text-xs">{device.gateway}</span>
-                </div>
-              )}
-              {!device.localIP && !device.macAddress && !device.gateway && (
-                <p className="text-xs text-muted-foreground">No network data available</p>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* Telemetry Chart */}
+      <Card className="p-4">
+        <TelemetryChart agentId={agent.id} />
       </Card>
 
       {/* Disk Partitions */}
-      {device.disks && device.disks.length > 0 && (
-        <Card className="gap-3 p-4">
-          <div className="flex items-center gap-2">
-            <HardDrive className="size-4 text-blue-400" />
-            <h2 className="text-sm font-semibold">Disk Partitions</h2>
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {device.disks.map((disk) => {
-              const usedPercent = disk.size > 0
-                ? Math.round(((disk.size - disk.freeSpace) / disk.size) * 100)
-                : 0
-              const usedGB = ((disk.size - disk.freeSpace) / 1073741824).toFixed(1)
-              const totalGB = (disk.size / 1073741824).toFixed(1)
-
+      {agent.disks && agent.disks.length > 0 && (
+        <Card className="p-4">
+          <h3 className="mb-2 text-sm font-semibold">Disk Partitions</h3>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {agent.disks.map((d) => {
+              const pct = d.size > 0 ? Math.round(((d.size - d.freeSpace) / d.size) * 100) : 0
               return (
-                <div key={disk.deviceID} className="rounded-lg border border-border p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-mono text-sm font-medium">{disk.deviceID}</span>
-                    <Badge variant={usedPercent > 90 ? "destructive" : "secondary"}>
-                      {usedPercent}%
-                    </Badge>
+                <div key={d.deviceID} className="rounded-lg border border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">{d.deviceID}</span>
+                    <span className="text-xs text-muted-foreground">{d.filesystem}</span>
                   </div>
-                  <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all ${
-                        usedPercent > 90 ? "bg-red-500" : usedPercent > 70 ? "bg-yellow-500" : "bg-green-500"
-                      }`}
-                      style={{ width: `${usedPercent}%` }}
-                    />
-                  </div>
-                  <div className="mt-2 flex justify-between text-xs text-muted-foreground">
-                    <span>{usedGB} GB used</span>
-                    <span>{totalGB} GB total</span>
-                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">{d.label || "—"}</p>
+                  <p className="mt-1 text-xs tabular-nums">
+                    {pct}% used &middot; {fmtBytes(d.size - d.freeSpace)} / {fmtBytes(d.size)}
+                  </p>
                 </div>
               )
             })}
@@ -199,47 +93,74 @@ export function SummaryTab({ device, recentAlerts = [], backupsNotImplemented }:
         </Card>
       )}
 
-      {/* Recent Alerts (CPU threshold only) */}
-      {recentAlerts.length > 0 && (
-        <Card className="gap-3 p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="size-4 text-yellow-400" />
-              <h2 className="text-sm font-semibold">Recent Alerts</h2>
-            </div>
-            <Badge variant="outline" className="text-[10px]">CPU threshold only</Badge>
+      {/* Network */}
+      <Card className="p-4">
+        <h3 className="mb-2 text-sm font-semibold">Network</h3>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="rounded-lg border border-border p-3">
+            <span className="text-xs text-muted-foreground">IP</span>
+            <p className="text-sm font-medium">{agent.localIP || "—"}</p>
           </div>
-          <div className="space-y-2">
-            {recentAlerts.map((alert) => (
-              <div key={alert.id} className="flex items-start justify-between rounded-lg border border-border p-2">
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium truncate">{alert.message}</p>
-                  <p className="text-[10px] text-muted-foreground">{alert.time}</p>
-                </div>
-                <Badge
-                  variant={alert.severity === "critical" ? "destructive" : alert.severity === "warning" ? "secondary" : "outline"}
-                  className="ml-2 shrink-0"
-                >
-                  {alert.severity}
-                </Badge>
-              </div>
-            ))}
+          <div className="rounded-lg border border-border p-3">
+            <span className="text-xs text-muted-foreground">MAC</span>
+            <p className="text-sm font-medium">{agent.macAddress || "—"}</p>
+          </div>
+          <div className="rounded-lg border border-border p-3">
+            <span className="text-xs text-muted-foreground">Gateway</span>
+            <p className="text-sm font-medium">{agent.gateway || "—"}</p>
+          </div>
+        </div>
+      </Card>
+
+      {/* GPU */}
+      {agent.gpuName && (
+        <Card className="p-4">
+          <h3 className="mb-2 text-sm font-semibold">Graphics</h3>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div className="rounded-lg border border-border p-3">
+              <span className="text-xs text-muted-foreground">GPU</span>
+              <p className="text-sm font-medium">{agent.gpuName}</p>
+            </div>
+            <div className="rounded-lg border border-border p-3">
+              <span className="text-xs text-muted-foreground">Driver</span>
+              <p className="text-sm font-medium">{agent.gpuDriver || "—"}</p>
+            </div>
           </div>
         </Card>
       )}
 
-      {/* Backups - Not Implemented (mock data, not trusted) */}
-      {backupsNotImplemented && (
-        <Card className="gap-3 p-4">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <span className="text-xs">Note:</span>
-            <Badge variant="outline" className="text-[10px]">Recent Backups — not implemented</Badge>
+      {/* Recent Alerts */}
+      <Card className="p-4">
+        <h3 className="mb-2 text-sm font-semibold">Recent Alerts</h3>
+        {alerts.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No recent alerts.</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {alerts.map((a) => (
+              <div key={a.id} className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={
+                      a.severity === "critical"
+                        ? "text-destructive"
+                        : a.severity === "warning"
+                          ? "text-warning"
+                          : "text-info"
+                    }
+                  >
+                    {a.severity}
+                  </Badge>
+                  <span className="text-sm">{a.message}</span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {new Date(a.time).toLocaleString()}
+                </span>
+              </div>
+            ))}
           </div>
-          <p className="text-xs text-muted-foreground">
-            Backup data is seed-only (not real execution). Connecting to UI requires scheduler implementation.
-          </p>
-        </Card>
-      )}
+        )}
+      </Card>
     </div>
   )
 }

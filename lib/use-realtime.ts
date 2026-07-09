@@ -59,7 +59,7 @@ export function useRealTimeNotifications() {
     connect()
 
     return () => {
-      if (ws) ws.close()
+      if (ws && ws.readyState <= WebSocket.OPEN) ws.close()
       if (reconnectTimeout) clearTimeout(reconnectTimeout)
     }
   }, [])

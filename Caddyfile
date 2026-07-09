@@ -1,0 +1,7 @@
+api.merckout.name {
+    reverse_proxy backend:8080
+}
+
+merckout.name {
+    reverse_proxy frontend:3000
+}

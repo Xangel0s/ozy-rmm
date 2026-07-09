@@ -55,6 +55,20 @@ export type TelemetryRow = {
   recordedAt: string
 }
 
+export type TelemetryBucket = {
+  bucket: string
+  cpu_avg: number
+  ram_avg: number
+  disk_avg: number
+}
+
+export type Tenant = {
+  id: string
+  name: string
+  slug: string
+  deviceCount?: number
+}
+
 export type BackupJob = {
   id: number
   agentId: string
@@ -101,6 +115,46 @@ async function get<T>(path: string): Promise<T> {
     headers,
   })
   if (!res.ok) throw new Error(`API ${path} responded with ${res.status}`)
+  return res.json() as Promise<T>
+}
+
+async function put<T>(path: string, body?: unknown): Promise<T> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : ""
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  }
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const res = await fetch(`${BACKEND}${path}`, {
+    method: "PUT",
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Unknown error" }))
+    throw new Error(err.error || `API ${path} responded with ${res.status}`)
+  }
+  return res.json() as Promise<T>
+}
+
+async function del<T = void>(path: string): Promise<T> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : ""
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  }
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const res = await fetch(`${BACKEND}${path}`, {
+    method: "DELETE",
+    headers,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Unknown error" }))
+    throw new Error(err.error || `API ${path} responded with ${res.status}`)
+  }
   return res.json() as Promise<T>
 }
 
@@ -188,6 +242,20 @@ export async function fetchAgentTelemetry(id: string): Promise<TelemetryRow[]> {
   }
 }
 
+export async function fetchAggregatedTelemetry(
+  id: string,
+  from: string,
+  to: string,
+  interval: string,
+): Promise<TelemetryBucket[]> {
+  try {
+    const params = new URLSearchParams({ id, from, to, interval })
+    return await get<TelemetryBucket[]>(`/api/agents/telemetry?${params}`)
+  } catch {
+    return []
+  }
+}
+
 export async function fetchAlerts(): Promise<AlertRow[]> {
   try {
     return await get<AlertRow[]>("/api/alerts")
@@ -245,6 +313,96 @@ export async function runBackup(agentId: string): Promise<void> {
   }
 }
 
+// ─── Backup Config ────────────────────────────────────────────────────────────
+
+export type BackupConfig = {
+  repoUrl: string
+  sourcePaths: string[]
+  cron: string
+  retentionDays: number
+  enabled: boolean
+}
+
+export async function fetchAgentBackupConfig(agentId: string): Promise<BackupConfig> {
+  try {
+    return await get<BackupConfig>(`/api/agents/${agentId}/backup-config`)
+  } catch {
+    return { repoUrl: "", sourcePaths: [], cron: "0 2 * * *", retentionDays: 30, enabled: true }
+  }
+}
+
+export async function updateAgentBackupConfig(agentId: string, data: BackupConfig & { repoPassword?: string }): Promise<void> {
+  try {
+    await put(`/api/agents/${agentId}/backup-config`, data)
+  } catch {
+    // silently ignore
+  }
+}
+
+export async function fetchAgentBackups(agentId: string): Promise<BackupJob[]> {
+  try {
+    return await get<BackupJob[]>(`/api/agents/${agentId}/backups`)
+  } catch {
+    return []
+  }
+}
+
+export async function createAgentBackupJob(agentId: string, data: { name: string; location: string; type?: string; cron?: string }): Promise<void> {
+  try {
+    await post(`/api/agents/${agentId}/backups`, data)
+  } catch {
+    // silently ignore
+  }
+}
+
+export async function deleteBackupJob(jobId: number): Promise<void> {
+  try {
+    await del(`/api/backup-jobs/${jobId}`)
+  } catch {
+    // silently ignore
+  }
+}
+
+export async function runAgentBackup(agentId: string, sourcePath?: string): Promise<void> {
+  try {
+    await post(`/api/agents/${agentId}/backups/run`, { sourcePath: sourcePath || "/backups/manual" })
+  } catch {
+    // silently ignore
+  }
+}
+
+// ─── Snapshots & Restore ──────────────────────────────────────────────────────
+
+export type SnapshotItem = {
+  id: string
+  source: string
+  description: string
+  startTime: string
+  endTime: string
+  [key: string]: unknown
+}
+
+export async function listSnapshots(agentId: string): Promise<SnapshotItem[]> {
+  try {
+    const raw = await post<SnapshotItem[] | { error: string }>(`/api/agents/${agentId}/backups/snapshots`, {})
+    if (Array.isArray(raw)) {
+      return raw
+    }
+    return []
+  } catch {
+    return []
+  }
+}
+
+export async function restoreSnapshot(agentId: string, snapshotId: string, destination: string): Promise<boolean> {
+  try {
+    await post(`/api/agents/${agentId}/backups/restore`, { snapshotId, destination })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // ─── Enrollment ───────────────────────────────────────────────────────────────
 
 export async function createRegistrationToken(label?: string): Promise<RegistrationToken> {
@@ -255,11 +413,67 @@ export async function createRegistrationToken(label?: string): Promise<Registrat
   })
 }
 
+export async function fetchTenants(): Promise<Tenant[]> {
+  try {
+    return await get<Tenant[]>("/api/tenants")
+  } catch {
+    return []
+  }
+}
+
+export type UserCreateReq = {
+  email: string
+  username: string
+  password: string
+  fullName?: string
+  role?: "admin" | "technician" | "viewer"
+}
+
+export type UserUpdateReq = {
+  email?: string
+  username?: string
+  fullName?: string
+  role?: "admin" | "technician" | "viewer"
+  password?: string
+}
+
 export async function fetchUsers(): Promise<UserInfo[]> {
   try {
     return await get<UserInfo[]>("/api/users")
   } catch {
     return []
+  }
+}
+
+export async function createUser(data: UserCreateReq): Promise<{ id: string }> {
+  return await post<{ id: string }>("/api/users", data)
+}
+
+export async function updateUser(id: string, data: UserUpdateReq): Promise<void> {
+  try {
+    await fetch(`${BACKEND}/api/users/${id}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("token") : ""}`,
+      },
+      body: JSON.stringify(data),
+    })
+  } catch {
+    // silently ignore
+  }
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  try {
+    await fetch(`${BACKEND}/api/users/${id}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("token") : ""}`,
+      },
+    })
+  } catch {
+    // silently ignore
   }
 }
 
@@ -409,6 +623,40 @@ export async function fetchAudit(agentId: string, limit = 50, offset = 0): Promi
   }
 }
 
+export type GlobalAuditEntry = AuditEntry & {
+  userId: string
+}
+
+export type GlobalAuditResponse = {
+  items: GlobalAuditEntry[]
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
+}
+
+export async function fetchGlobalAudit(params: {
+  action?: string
+  resourceType?: string
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+} = {}): Promise<GlobalAuditResponse> {
+  try {
+    const q = new URLSearchParams()
+    if (params.action) q.set("action", params.action)
+    if (params.resourceType) q.set("resourceType", params.resourceType)
+    if (params.from) q.set("from", params.from)
+    if (params.to) q.set("to", params.to)
+    if (params.limit) q.set("limit", String(params.limit))
+    if (params.offset) q.set("offset", String(params.offset))
+    return await get<GlobalAuditResponse>(`/api/audit?${q.toString()}`)
+  } catch {
+    return { items: [], total: 0, limit: params.limit ?? 50, offset: params.offset ?? 0, hasMore: false }
+  }
+}
+
 // ─── Patches ─────────────────────────────────────────────────────────────────
 
 export type PatchItem = {
@@ -509,5 +757,84 @@ export async function runCheck(checkId: number): Promise<void> {
     })
   } catch {
     // silently ignore
+  }
+}
+
+// ─── Scripts ─────────────────────────────────────────────────────────────────
+
+export type ScriptInfo = {
+  id: number
+  name: string
+  description: string
+  command: string
+  language: string
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type ScriptExecution = {
+  id: number
+  scriptId: number
+  scriptName: string
+  agentId: string
+  agentHostname: string
+  executedBy: string
+  status: string
+  exitCode: number
+  output: string
+  outputTruncated: boolean
+  durationMs: number
+  startedAt: string
+  finishedAt: string
+}
+
+export async function fetchScripts(): Promise<ScriptInfo[]> {
+  try {
+    return await get<ScriptInfo[]>("/api/scripts")
+  } catch {
+    return []
+  }
+}
+
+export async function fetchScript(id: number): Promise<ScriptInfo | null> {
+  try {
+    return await get<ScriptInfo>(`/api/scripts/${id}`)
+  } catch {
+    return null
+  }
+}
+
+export async function createScript(data: { name: string; description?: string; command: string; language?: string }): Promise<{ id: number }> {
+  return await post<{ id: number }>("/api/scripts", data)
+}
+
+export async function updateScript(id: number, data: { name?: string; description?: string; command?: string; language?: string }): Promise<void> {
+  await put(`/api/scripts/${id}`, data)
+}
+
+export async function deleteScript(id: number): Promise<void> {
+  await del(`/api/scripts/${id}`)
+}
+
+export async function runScript(scriptId: number, agentId: string): Promise<{ executionId: number; status: string }> {
+  return await post<{ executionId: number; status: string }>(`/api/scripts/${scriptId}/run`, { agentId })
+}
+
+export async function fetchScriptExecutions(params: {
+  scriptId?: number
+  agentId?: string
+  limit?: number
+  offset?: number
+} = {}): Promise<ScriptExecution[]> {
+  try {
+    const q = new URLSearchParams()
+    if (params.scriptId) q.set("scriptId", String(params.scriptId))
+    if (params.agentId) q.set("agentId", params.agentId)
+    if (params.limit) q.set("limit", String(params.limit))
+    if (params.offset) q.set("offset", String(params.offset))
+    return await get<ScriptExecution[]>(`/api/script-executions?${q.toString()}`)
+  } catch {
+    return []
   }
 }

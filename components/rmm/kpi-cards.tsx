@@ -1,7 +1,7 @@
 import { AlertTriangle, Cpu, MonitorSmartphone, ShieldCheck } from "lucide-react"
 import { Card } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import type { Device } from "@/lib/rmm-data"
+import type { Device } from "@/lib/types"
 
 export function KpiCards({ devices }: { devices: Device[] }) {
   const total = devices.length

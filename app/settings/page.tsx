@@ -2,115 +2,105 @@
 
 import * as React from "react"
 import { toast } from "sonner"
-import { Save } from "lucide-react"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { ConsoleShell } from "@/components/rmm/console-shell"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { UsersTable } from "@/components/rmm/users-table"
+import { UserDialog } from "@/components/rmm/user-dialog"
+import { AuditLog } from "@/components/rmm/audit-log"
+import { useUsers } from "@/lib/use-live-data"
+import { createUser, updateUser, deleteUser } from "@/lib/api"
+import type { UserInfo } from "@/lib/api"
 
 export default function SettingsPage() {
-  const [tenant, setTenant] = React.useState("all")
-  const [query, setQuery] = React.useState("")
+  const { users, loading } = useUsers()
 
-  const [agentInterval, setAgentInterval] = React.useState("60")
-  const [retentionDays, setRetentionDays] = React.useState("30")
-  const [timezone, setTimezone] = React.useState("America/Bogota")
-  const [autoDeploy, setAutoDeploy] = React.useState(true)
-  const [maintenanceMode, setMaintenanceMode] = React.useState(false)
+  const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [editingUser, setEditingUser] = React.useState<UserInfo | null>(null)
 
-  const saveSettings = () => {
-    toast.success("Settings saved", {
-      description: "Operational preferences were updated successfully.",
-    })
+  const handleCreate = () => {
+    setEditingUser(null)
+    setDialogOpen(true)
+  }
+
+  const handleEdit = (user: UserInfo) => {
+    setEditingUser(user)
+    setDialogOpen(true)
+  }
+
+  const handleSave = async (data: any) => {
+    try {
+      if (editingUser) {
+        await updateUser(editingUser.id, data)
+        toast.success("User updated", {
+          description: `${data.email} has been updated.`,
+        })
+      } else {
+        const res = await createUser(data)
+        toast.success("User created", {
+          description: `${data.email} (ID: ${res.id.substring(0, 8)}...)`,
+        })
+      }
+    } catch (e: any) {
+      toast.error("Error", {
+        description: String(e?.message ?? e),
+      })
+    }
+  }
+
+  const handleDelete = async (user: UserInfo) => {
+    if (!confirm(`Delete user "${user.email}"? This cannot be undone.`)) return
+
+    try {
+      await deleteUser(user.id)
+      toast.success("User deleted", {
+        description: `${user.email} has been removed.`,
+      })
+    } catch (e: any) {
+      toast.error("Error", {
+        description: String(e?.message ?? e),
+      })
+    }
   }
 
   return (
-    <ConsoleShell
-      tenant={tenant}
-      onTenantChange={setTenant}
-      query={query}
-      onQueryChange={setQuery}
-      title="Settings"
-      subtitle="Platform configuration"
-      showSearch={false}
-    >
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Card className="gap-4 p-4">
-          <div>
-            <h2 className="text-sm font-semibold">Agent Policies</h2>
-            <p className="text-xs text-muted-foreground">
-              Define polling cadence and automated onboarding behavior.
-            </p>
-          </div>
+    <ConsoleShell title="Settings" subtitle="Platform configuration" showSearch={false}>
+      <Tabs defaultValue="users">
+        <TabsList>
+          <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="audit">Audit</TabsTrigger>
+          <TabsTrigger value="general">General</TabsTrigger>
+        </TabsList>
 
-          <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Heartbeat interval (seconds)</span>
-            <Input value={agentInterval} onChange={(e) => setAgentInterval(e.target.value)} />
-          </label>
-
-          <div className="flex items-center justify-between rounded-lg border border-border p-3">
-            <div>
-              <p className="text-sm font-medium">Auto deploy agent on discovery</p>
-              <p className="text-xs text-muted-foreground">Enroll new endpoints automatically.</p>
-            </div>
-            <Checkbox checked={autoDeploy} onCheckedChange={(checked) => setAutoDeploy(checked === true)} />
-          </div>
-        </Card>
-
-        <Card className="gap-4 p-4">
-          <div>
-            <h2 className="text-sm font-semibold">Platform Defaults</h2>
-            <p className="text-xs text-muted-foreground">
-              Audit retention and regional settings used by the console.
-            </p>
-          </div>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Log retention (days)</span>
-            <Input value={retentionDays} onChange={(e) => setRetentionDays(e.target.value)} />
-          </label>
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-muted-foreground">Timezone</span>
-            <Select value={timezone} onValueChange={(v) => v && setTimezone(v)}>
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select timezone" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="America/Bogota">America/Bogota (UTC-5)</SelectItem>
-                <SelectItem value="America/Mexico_City">America/Mexico_City (UTC-6)</SelectItem>
-                <SelectItem value="America/Santiago">America/Santiago (UTC-4)</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex items-center justify-between rounded-lg border border-border p-3">
-            <div>
-              <p className="text-sm font-medium">Maintenance mode</p>
-              <p className="text-xs text-muted-foreground">Pause automation and alert escalations.</p>
-            </div>
-            <Checkbox
-              checked={maintenanceMode}
-              onCheckedChange={(checked) => setMaintenanceMode(checked === true)}
+        <TabsContent value="users">
+          {loading ? (
+            <p className="text-sm text-muted-foreground">Loading users...</p>
+          ) : (
+            <UsersTable
+              users={users}
+              onEdit={handleEdit}
+              onDelete={handleDelete}
+              onCreate={handleCreate}
             />
-          </div>
-        </Card>
-      </div>
+          )}
 
-      <div className="flex justify-end">
-        <Button onClick={saveSettings}>
-          <Save data-icon="inline-start" />
-          Save Changes
-        </Button>
-      </div>
+          <UserDialog
+            open={dialogOpen}
+            onOpenChange={setDialogOpen}
+            user={editingUser}
+            onSave={handleSave}
+          />
+        </TabsContent>
+
+        <TabsContent value="audit">
+          <AuditLog />
+        </TabsContent>
+
+        <TabsContent value="general">
+          <p className="text-sm text-muted-foreground">
+            General settings coming soon.
+          </p>
+        </TabsContent>
+      </Tabs>
     </ConsoleShell>
   )
 }

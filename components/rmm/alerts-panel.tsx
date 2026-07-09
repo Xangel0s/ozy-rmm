@@ -35,7 +35,7 @@ function toDisplayAlert(a: { id: number; agentId: string; severity: string; mess
 }
 
 export function AlertsPanel() {
-  const { alerts: liveAlerts, loading } = useAlerts(10000)
+  const { alerts: liveAlerts, loading } = useAlerts()
 
   const raw = liveAlerts.map(toDisplayAlert)
   const criticalCount = raw.filter((a) => a.severity === "critical").length

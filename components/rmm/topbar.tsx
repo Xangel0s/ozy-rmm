@@ -4,8 +4,7 @@ import { PlayCircle, RefreshCw, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { DeployAgentDialog } from "@/components/rmm/deploy-agent-dialog"
-import { tenants } from "@/lib/rmm-data"
-import { useAgents } from "@/lib/use-live-data"
+import { useAgents, useTenants } from "@/lib/use-live-data"
 import { cn } from "@/lib/utils"
 
 export function Topbar({
@@ -27,11 +26,12 @@ export function Topbar({
   subtitle?: string
   showSearch?: boolean
 }) {
-  const tenantName = tenants.find((t) => t.id === tenant)?.name ?? "All Clients"
+  const { tenants: liveTenants } = useTenants()
+  const tenantName = liveTenants.find((t) => t.id === tenant)?.name ?? "All Clients"
   const headerSubtitle = subtitle ?? tenantName
 
   // Shows live backend connection status
-  const { agents, loading: agentsLoading, error: agentsError } = useAgents(5000)
+  const { agents, loading: agentsLoading, error: agentsError } = useAgents()
   const isLive = !agentsLoading && !agentsError && agents.length > 0
   const isMock = !agentsLoading && (agentsError !== null || agents.length === 0)
 

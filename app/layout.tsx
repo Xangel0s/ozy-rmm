@@ -1,6 +1,7 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
+import { Providers } from '@/app/providers'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Toaster } from '@/components/ui/sonner'
 import { RealTimeNotifier } from '@/components/rmm/realtime-notifier'
@@ -52,10 +53,12 @@ export default function RootLayout({
       className={`dark ${geistSans.variable} ${geistMono.variable}`}
     >
       <body className="bg-background font-sans antialiased">
-        <RealTimeNotifier />
-        <TooltipProvider delay={200}>{children}</TooltipProvider>
-        <Toaster position="bottom-right" />
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        <Providers>
+          <RealTimeNotifier />
+          <TooltipProvider delay={200}>{children}</TooltipProvider>
+          <Toaster position="bottom-right" />
+          {process.env.NODE_ENV === 'production' && <Analytics />}
+        </Providers>
       </body>
     </html>
   )

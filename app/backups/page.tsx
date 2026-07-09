@@ -16,8 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { deviceBackups, devices as mockDevices, tenants } from "@/lib/rmm-data"
-import { useBackups, useAgents, agentToDevice } from "@/lib/use-live-data"
+import { useBackups, useAgents, useTenants, agentToDevice } from "@/lib/use-live-data"
 import { runBackup } from "@/lib/api"
 import type { BackupJob } from "@/lib/api"
 
@@ -38,78 +37,42 @@ export default function BackupsPage() {
   )
 
   // Live data
-  const { backups: liveBackups } = useBackups(15000)
-  const { agents } = useAgents(5000)
+  const { backups: liveBackups } = useBackups()
+  const { agents } = useAgents()
+  const { tenants: liveTenants } = useTenants()
   const liveDevices = React.useMemo(() => agents.map(agentToDevice), [agents])
 
-  // Use live or mock depending on backend availability
-  const isLive = liveBackups.length > 0
-  const tenantName = tenants.find((t) => t.id === tenant)?.name
+  const tenantName = liveTenants.find((t) => t.id === tenant)?.name
 
   // Build unified records for the table
   const records = React.useMemo(() => {
-    if (isLive) {
-      // Live path: join backup_jobs with live agents
-      const q = query.trim().toLowerCase()
-      const deviceMap = new Map(liveDevices.map((d) => [d.id, d]))
-
-      return liveBackups
-        .filter((b) => {
-          const matchStatus = statusFilter === "all" || b.status === statusFilter
-          const matchQuery =
-            q === "" ||
-            b.name.toLowerCase().includes(q) ||
-            b.location.toLowerCase().includes(q) ||
-            b.agentId.toLowerCase().includes(q)
-          return matchStatus && matchQuery
-        })
-        .map((b) => ({
-          id: String(b.id),
-          name: b.name,
-          location: b.location,
-          deviceId: b.agentId,
-          deviceName: deviceMap.get(b.agentId)?.name ?? b.agentId,
-          deviceTenant: deviceMap.get(b.agentId)?.tenant ?? "Live Agent",
-          type: b.type,
-          status: b.status as "completed" | "running" | "failed" | "pending",
-          size: fmtBytes(b.sizeBytes),
-          cron: b.cron,
-          executedAt: b.executedAt ? new Date(b.executedAt).toLocaleString() : "—",
-        }))
-    }
-
-    // Mock path
     const q = query.trim().toLowerCase()
-    return deviceBackups
-      .map((backup) => ({
-        backup,
-        device: mockDevices.find((d) => d.id === backup.deviceId),
-      }))
-      .filter((entry) => {
-        if (!entry.device) return false
-        const matchTenant = tenant === "all" || entry.device.tenant === tenantName
-        const matchStatus = statusFilter === "all" || entry.backup.status === statusFilter
+    const deviceMap = new Map(liveDevices.map((d) => [d.id, d]))
+
+    return liveBackups
+      .filter((b) => {
+        const matchStatus = statusFilter === "all" || b.status === statusFilter
         const matchQuery =
           q === "" ||
-          entry.backup.name.toLowerCase().includes(q) ||
-          entry.backup.location.toLowerCase().includes(q) ||
-          entry.device.name.toLowerCase().includes(q)
-        return matchTenant && matchStatus && matchQuery
+          b.name.toLowerCase().includes(q) ||
+          b.location.toLowerCase().includes(q) ||
+          b.agentId.toLowerCase().includes(q)
+        return matchStatus && matchQuery
       })
-      .map(({ backup, device }) => ({
-        id: backup.id,
-        name: backup.name,
-        location: backup.location,
-        deviceId: device!.id,
-        deviceName: device!.name,
-        deviceTenant: device!.tenant,
-        type: backup.type,
-        status: backup.status as "completed" | "running" | "failed" | "pending",
-        size: backup.size,
-        cron: backup.cron,
-        executedAt: backup.createdAt,
+      .map((b) => ({
+        id: String(b.id),
+        name: b.name,
+        location: b.location,
+        deviceId: b.agentId,
+        deviceName: deviceMap.get(b.agentId)?.name ?? b.agentId,
+        deviceTenant: deviceMap.get(b.agentId)?.tenant ?? "Live Agent",
+        type: b.type,
+        status: b.status as "completed" | "running" | "failed" | "pending",
+        size: fmtBytes(b.sizeBytes),
+        cron: b.cron,
+        executedAt: b.executedAt ? new Date(b.executedAt).toLocaleString() : "—",
       }))
-  }, [isLive, liveBackups, liveDevices, deviceBackups, mockDevices, query, statusFilter, tenant, tenantName])
+  }, [liveBackups, liveDevices, query, statusFilter])
 
   const stats = React.useMemo(
     () => ({
@@ -193,7 +156,11 @@ export default function BackupsPage() {
         {records.length === 0 ? (
           <div className="px-4 py-8 text-center">
             <ArchiveRestore className="mx-auto mb-2 size-5 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">No backup records for this filter.</p>
+            <p className="text-sm text-muted-foreground">
+              {liveBackups.length === 0
+                ? "No backup jobs configured. Create a schedule from a device's Backups tab."
+                : "No backup records for this filter."}
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">

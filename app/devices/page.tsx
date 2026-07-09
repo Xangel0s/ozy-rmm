@@ -6,23 +6,23 @@ import { ConsoleShell } from "@/components/rmm/console-shell"
 import { DeviceTable } from "@/components/rmm/device-table"
 import { KpiCards } from "@/components/rmm/kpi-cards"
 import { Card } from "@/components/ui/card"
-import { devices as mockDevices, tenants } from "@/lib/rmm-data"
-import { useAgents, agentToDevice } from "@/lib/use-live-data"
+import { useAgents, useTenants, agentToDevice } from "@/lib/use-live-data"
 
 export default function DevicesPage() {
   const [tenant, setTenant] = React.useState("all")
   const [query, setQuery] = React.useState("")
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
 
-  // Live data from the Go backend — falls back to mock devices when backend is offline
-  const { agents } = useAgents(5000)
-  const liveDevices = React.useMemo(
-    () => (agents.length > 0 ? agents.map(agentToDevice) : []),
+  // Live data from the Go backend
+  const { agents, loading: agentsLoading } = useAgents()
+  const { tenants: liveTenants } = useTenants()
+
+  const allDevices = React.useMemo(
+    () => agents.map(agentToDevice),
     [agents]
   )
-  const allDevices = liveDevices.length > 0 ? liveDevices : mockDevices
 
-  const tenantName = tenants.find((t) => t.id === tenant)?.name
+  const tenantName = liveTenants.find((t) => t.id === tenant)?.name
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase()
