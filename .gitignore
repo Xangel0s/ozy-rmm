@@ -18,9 +18,30 @@ node_modules
 *.exe
 *.exe~
 backend/backend
+backend/main
 agent/agent
+
+# SQLite local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Log files
+*.log
+*.err
 
 # Temp files
 *.tmp
 *.tmp2
+*.cmd
 tsconfig.tsbuildinfo
+
+# Redirect artifacts
+0
+
+# Agent local secrets & scripts
+agent/enroll-token.txt
+agent/read-token/
+
+# Backend utility tools
+backend/cmd/
