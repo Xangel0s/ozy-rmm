@@ -314,50 +314,58 @@ var (
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
 
-type LoginAttempt struct {
-	Count     int
-	LockedAt  time.Time
-}
-
-var (
-	rateLimitMu sync.Mutex
-	rateLimit   = make(map[string]*LoginAttempt)
+const (
+	rateLimitUserThreshold    = 5
+	rateLimitIPThreshold      = 20
+	rateLimitWindow           = 15 * time.Minute
 )
 
-func checkRateLimit(ip string) bool {
-	rateLimitMu.Lock()
-	defer rateLimitMu.Unlock()
-
-	attempt, exists := rateLimit[ip]
-	if !exists {
-		return true
-	}
-
-	if attempt.Count >= 5 && time.Since(attempt.LockedAt) < 15*time.Minute {
-		return false
-	}
-
-	if time.Since(attempt.LockedAt) >= 15*time.Minute {
-		delete(rateLimit, ip)
-		return true
-	}
-
-	return true
+// rateLimitedUser returns true if the user identifier has exceeded the
+// failed-attempt threshold within the window (resets on successful login).
+func rateLimitedUser(identifier string) bool {
+	var count int
+	db.QueryRow(`
+		SELECT COUNT(*) FROM login_attempts a
+		WHERE a.identifier = $1 AND a.type = 'user' AND a.success = false
+		AND a.attempted_at > NOW() - ($2 || ' minutes')::INTERVAL
+		AND NOT EXISTS (
+			SELECT 1 FROM login_attempts b
+			WHERE b.identifier = $1 AND b.type = 'user' AND b.success = true
+			AND b.attempted_at > a.attempted_at
+		)
+	`, identifier, int(rateLimitWindow.Minutes())).Scan(&count)
+	return count >= rateLimitUserThreshold
 }
 
-func recordLoginAttempt(ip string) {
-	rateLimitMu.Lock()
-	defer rateLimitMu.Unlock()
+// rateLimitedIP returns true if the IP has exceeded the failed-attempt
+// threshold within the window (resets on successful login from that IP).
+func rateLimitedIP(ip string) bool {
+	var count int
+	db.QueryRow(`
+		SELECT COUNT(*) FROM login_attempts a
+		WHERE a.identifier = $1 AND a.type = 'ip' AND a.success = false
+		AND a.attempted_at > NOW() - ($2 || ' minutes')::INTERVAL
+		AND NOT EXISTS (
+			SELECT 1 FROM login_attempts b
+			WHERE b.identifier = $1 AND b.type = 'ip' AND b.success = true
+			AND b.attempted_at > a.attempted_at
+		)
+	`, ip, int(rateLimitWindow.Minutes())).Scan(&count)
+	return count >= rateLimitIPThreshold
+}
 
-	attempt, exists := rateLimit[ip]
-	if !exists {
-		rateLimit[ip] = &LoginAttempt{Count: 1, LockedAt: time.Now()}
-		return
-	}
+func recordLoginAttempt(identifier, idType string, success bool) {
+	db.Exec(`INSERT INTO login_attempts (identifier, type, success) VALUES ($1, $2, $3)`,
+		identifier, idType, success)
+}
 
-	attempt.Count++
-	if attempt.Count >= 5 {
-		attempt.LockedAt = time.Now()
+// pruneLoginAttempts runs every hour and removes records older than 24 hours.
+func pruneLoginAttempts() {
+	for {
+		time.Sleep(1 * time.Hour)
+		if _, err := db.Exec(`DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '24 hours'`); err != nil {
+			log.Printf("Login attempt pruning error: %v", err)
+		}
 	}
 }
 
@@ -681,8 +689,17 @@ func runMigrations() {
 	CREATE INDEX IF NOT EXISTS idx_terminal_sessions_agent ON terminal_sessions(agent_id);
 	CREATE INDEX IF NOT EXISTS idx_terminal_sessions_user ON terminal_sessions(user_id);
 
-	GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE scripts, script_executions, terminal_sessions, agent_backup_configs TO apexrmm_app;
-	GRANT USAGE, SELECT ON SEQUENCE scripts_id_seq, script_executions_id_seq, terminal_sessions_id_seq, agent_backup_configs_id_seq TO apexrmm_app;
+	CREATE TABLE IF NOT EXISTS login_attempts (
+		id BIGSERIAL PRIMARY KEY,
+		identifier VARCHAR(255) NOT NULL,
+		type VARCHAR(10) NOT NULL CHECK (type IN ('ip', 'user')),
+		success BOOLEAN NOT NULL DEFAULT false,
+		attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(identifier, type, attempted_at);
+
+	GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE scripts, script_executions, terminal_sessions, agent_backup_configs, login_attempts TO apexrmm_app;
+	GRANT USAGE, SELECT ON SEQUENCE scripts_id_seq, script_executions_id_seq, terminal_sessions_id_seq, agent_backup_configs_id_seq, login_attempts_id_seq TO apexrmm_app;
 
 	ALTER TABLE agent_backup_configs ENABLE ROW LEVEL SECURITY;
 	ALTER TABLE agent_backup_configs FORCE ROW LEVEL SECURITY;
@@ -1399,14 +1416,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
 	ip := clientIP(r)
 
-	if !checkRateLimit(ip) {
-		http.Error(w, `{"error":"too many attempts. Try again in 15 minutes."}`, http.StatusTooManyRequests)
+	if rateLimitedIP(ip) {
+		recordLoginAttempt(ip, "ip", false)
+		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -1420,43 +1438,44 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Support both email and username login
 	loginField := req.Username
 	if loginField == "" {
 		loginField = req.Email
 	}
 
-	// BYPASS RLS for the user lookup: login has no tenant context yet
-	// (the user is identifying themselves). The result's tenant_id is
-	// what subsequent requests will scope themselves to via the JWT.
-	// Once the user authenticates, all tenant-scoped queries go through
-	// the WithTenant wrapper using the tenant_id from the JWT claims.
+	if rateLimitedUser(loginField) {
+		recordLoginAttempt(loginField, "user", false)
+		recordLoginAttempt(ip, "ip", false)
+		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
+		return
+	}
+
 	var hash, userID, tenantID, role string
 	err := dbAdmin.QueryRow(`
 		SELECT id, tenant_id, password_hash, role FROM users
 		WHERE (username = $1 OR email = $1) AND is_active = true
 	`, loginField).Scan(&userID, &tenantID, &hash, &role)
 	if err != nil {
-		recordLoginAttempt(ip)
+		recordLoginAttempt(loginField, "user", false)
+		recordLoginAttempt(ip, "ip", false)
 		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
-		recordLoginAttempt(ip)
+		recordLoginAttempt(loginField, "user", false)
+		recordLoginAttempt(ip, "ip", false)
 		http.Error(w, `{"error":"invalid credentials"}`, http.StatusUnauthorized)
 		return
 	}
 
-	// Reset rate limit on success
-	rateLimitMu.Lock()
-	delete(rateLimit, ip)
-	rateLimitMu.Unlock()
+	// Record success to reset counters for this user and IP
+	recordLoginAttempt(loginField, "user", true)
+	recordLoginAttempt(ip, "ip", true)
 
-	// Update last login — uses the user-scoped wrapper now that we have
-	// the user's tenant_id. RLS will allow it because tenant_id matches.
+	// Update last login
 	if err := WithTenantWrite(tenantID, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`UPDATE users SET last_login = NOW(), failed_attempts = 0 WHERE id = $1`, userID)
+		_, err := tx.Exec(`UPDATE users SET last_login = NOW() WHERE id = $1`, userID)
 		return err
 	}); err != nil {
 		log.Printf("Failed to update last_login: %v", err)
@@ -5045,6 +5064,7 @@ func main() {
 	initBackupEncryption()
 	initDB()
 	pruneOldTelemetry()
+	go pruneLoginAttempts()
 	go startBackupScheduler()
 
 	// Public routes
