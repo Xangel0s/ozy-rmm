@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	_ "modernc.org/sqlite"
 )
 
@@ -381,6 +382,33 @@ func getMACAddress() string {
 	return ""
 }
 
+// ─── Windows Event Log Writer ──────────────────────────────────────────────────
+
+type winEventLogWriter struct {
+	el *eventlog.Log
+}
+
+func (w *winEventLogWriter) Write(p []byte) (int, error) {
+	if w.el == nil {
+		return len(p), nil
+	}
+	msg := strings.TrimRight(string(p), "\r\n")
+	w.el.Info(1, msg)
+	return len(p), nil
+}
+
+func initEventLog() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	el, err := eventlog.Open("OzyShieldAgent")
+	if err != nil {
+		log.Printf("Warning: could not open Windows Event Log: %v", err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, &winEventLogWriter{el: el}))
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -395,6 +423,7 @@ func main() {
 	log.Printf("Starting agent v%s on %s (%s) [Backend: %s]", AGENT_VERSION, hostname, runtime.GOOS, backendAddr)
 
 	initLocalDB()
+	initEventLog()
 
 	if id, _, jwt, ok := loadCredentials(); ok {
 		agentID = id

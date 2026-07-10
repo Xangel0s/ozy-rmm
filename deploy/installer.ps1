@@ -1,98 +1,125 @@
-# OzyShield Agent Installer (Dropper)
-# Debe ser ejecutado como Administrador.
+<#
+.SYNOPSIS
+    Installs the ApexRMM agent as a Windows service.
+.DESCRIPTION
+    Copies agent.exe to C:\ProgramData\OzyShield, registers it as a Windows
+    service with recovery policy, configures environment variables, and starts
+    the service. Run as Administrator.
+.PARAMETER BackendUrl
+    The backend server address (e.g. "https://rmm.example.com" or "localhost:8080").
+.PARAMETER EnrollToken
+    Required. Registration token obtained from the RMM dashboard Settings page.
+.PARAMETER BinaryPath
+    Path to agent.exe. Defaults to .\agent.exe relative to the script.
+.EXAMPLE
+    .\installer.ps1 -BackendUrl "https://rmm.example.com" -EnrollToken "abc123..."
+#>
+
+param(
+    [Parameter(Mandatory)]
+    [string]$BackendUrl,
+    [Parameter(Mandatory)]
+    [string]$EnrollToken,
+    [string]$BinaryPath = ""
+)
 
 $ErrorActionPreference = "Stop"
-
-# Configuración
 $ServiceName = "OzyShieldAgent"
 $InstallDir = "C:\ProgramData\OzyShield"
 $AgentExe = "agent.exe"
-$BackendUrl = "localhost:8080" # Cambiar por la URL pública en producción
-$AgentId = $env:COMPUTERNAME.ToLower()
+$EventSource = "OzyShieldAgent"
 
-Write-Host "[*] Iniciando instalación de OzyShield Agent..." -ForegroundColor Cyan
-
-# 1. Verificar privilegios de administrador
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# ─── Admin check ───────────────────────────────────────────────────────────
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
 if (-not $isAdmin) {
-    Write-Error "Este script DEBE ejecutarse con privilegios de Administrador (elevado)."
-    Exit 1
+    Write-Error "This script must be run as Administrator."
+    exit 1
 }
 
-# 2. Evasión Básica - Agregar exclusión de Windows Defender ANTES de la instalación
-Write-Host "[*] Configurando exclusión de Windows Defender para: $InstallDir" -ForegroundColor Yellow
-if (Get-Command Add-MpPreference -ErrorAction SilentlyContinue) {
-    try {
-        Add-MpPreference -ExclusionPath $InstallDir -ErrorAction Stop
-        Write-Host "[+] Exclusión agregada correctamente." -ForegroundColor Green
-    } catch {
-        Write-Host "[!] Advertencia: No se pudo agregar la exclusión de Windows Defender. Continuando..." -ForegroundColor DarkYellow
+# ─── Resolve binary path ───────────────────────────────────────────────────
+if (-not $BinaryPath) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $BinaryPath = Join-Path -Path $ScriptDir -ChildPath "..\agent\agent.exe"
+    if (-not (Test-Path $BinaryPath)) {
+        $BinaryPath = Join-Path -Path $ScriptDir -ChildPath "agent.exe"
+        if (-not (Test-Path $BinaryPath)) {
+            $BinaryPath = ".\agent.exe"
+        }
     }
 }
+$BinaryPath = Resolve-Path $BinaryPath -ErrorAction Stop
 
-# 3. Crear directorio de instalación oculto
+# ─── Create install directory ──────────────────────────────────────────────
 if (-not (Test-Path $InstallDir)) {
-    Write-Host "[*] Creando directorio oculto: $InstallDir"
-    $folder = New-Item -ItemType Directory -Force -Path $InstallDir
-    $folder.Attributes = 'Hidden', 'System', 'Directory'
+    $null = New-Item -ItemType Directory -Force -Path $InstallDir
 }
 
-# 4. Detener servicio previo si existe
-if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-    Write-Host "[*] Deteniendo servicio existente..."
+# ─── Stop + remove existing service ────────────────────────────────────────
+$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "[*] Stopping existing service..."
     Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-    # Pequeña pausa para asegurar la liberación del archivo
     Start-Sleep -Seconds 2
-}
-
-# 5. Descargar/Copiar binario
-# En un entorno real de producción:
-# Invoke-WebRequest -Uri "http://$BackendUrl/downloads/agent.exe" -OutFile "$InstallDir\$AgentExe"
-# Para desarrollo local, copiamos el binario recién compilado de la ruta de workspace:
-$LocalSource = "$PSScriptRoot\..\agent\agent.exe"
-if (Test-Path $LocalSource) {
-    Write-Host "[*] Copiando binario local: $LocalSource -> $InstallDir\$AgentExe"
-    Copy-Item -Path $LocalSource -Destination "$InstallDir\$AgentExe" -Force
-} else {
-    Write-Host "[!] No se encontró agent.exe local en $LocalSource." -ForegroundColor DarkYellow
-    Write-Host "[*] Buscando en el directorio actual..."
-    if (Test-Path "agent.exe") {
-        Copy-Item -Path "agent.exe" -Destination "$InstallDir\$AgentExe" -Force
-    } else {
-        Write-Error "No se pudo localizar el binario agent.exe para la instalación."
-        Exit 1
-    }
-}
-
-# 6. Registrar como Servicio de Windows (sc create)
-Write-Host "[*] Registrando servicio Windows '$ServiceName'..." -ForegroundColor Yellow
-
-# Eliminamos servicio previo si está registrado para evitar colisiones
-if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-    & sc.exe delete $ServiceName | Out-Null
+    & sc.exe delete $ServiceName 2>&1 | Out-Null
     Start-Sleep -Seconds 1
 }
 
-# Registramos servicio nativo que corre bajo SYSTEM account
+# ─── Copy binary ───────────────────────────────────────────────────────────
+Write-Host "[*] Copying $BinaryPath -> $InstallDir\$AgentExe"
+Copy-Item -Path $BinaryPath -Destination "$InstallDir\$AgentExe" -Force
+
+# ─── Register service ──────────────────────────────────────────────────────
 $binaryPath = "`"$InstallDir\$AgentExe`""
 & sc.exe create $ServiceName binPath= $binaryPath start= auto | Out-Null
-& sc.exe description $ServiceName "ApexRMM OzyShield Remote Management Agent" | Out-Null
+& sc.exe description $ServiceName "ApexRMM Remote Monitoring Agent" | Out-Null
 
-# 7. Configurar variables de entorno específicas para el servicio
-# Las almacenamos en el registro para el contexto del servicio
-$RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-if (Test-Path $RegistryPath) {
-    Write-Host "[*] Configurando variables de entorno (BACKEND_URL: $BackendUrl, AGENT_ID: $AgentId)..."
-    # Guardamos en la llave Environment
-    $envList = @(
-        "BACKEND_URL=$BackendUrl",
-        "AGENT_ID=$AgentId"
-    )
-    New-ItemProperty -Path $RegistryPath -Name "Environment" -Value $envList -PropertyType MultiString -Force | Out-Null
+# ─── Recovery policy: restart after 5s, restart after 10s, restart after 60s ──
+& sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/60000 | Out-Null
+
+# ─── Environment variables (SCM reads this for the service process) ────────
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+$envList = @(
+    "BACKEND_URL=$BackendUrl",
+    "ENROLL_TOKEN=$EnrollToken"
+)
+$null = New-ItemProperty -Path $regPath -Name "Environment" -Value $envList -PropertyType MultiString -Force
+
+# ─── Event Log source ──────────────────────────────────────────────────────
+# Create the event source if it doesn't already exist. This requires admin.
+if (-not [System.Diagnostics.EventLog]::SourceExists($EventSource)) {
+    try {
+        [System.Diagnostics.EventLog]::CreateEventSource($EventSource, "Application")
+        Write-Host "[+] Event source '$EventSource' registered." -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Could not register event source: $_" -ForegroundColor DarkYellow
+    }
 }
 
-# 8. Iniciar el servicio
-Write-Host "[*] Iniciando el servicio..." -ForegroundColor Cyan
+# ─── Start service ─────────────────────────────────────────────────────────
+Write-Host "[*] Starting service '$ServiceName'..." -ForegroundColor Cyan
 Start-Service -Name $ServiceName
+Start-Sleep -Seconds 3
 
-Write-Host "[+] Instalación completada exitosamente. El agente ahora corre en segundo plano como servicio de Windows." -ForegroundColor Green
+# ─── Verify ────────────────────────────────────────────────────────────────
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($svc.Status -eq "Running") {
+    Write-Host "[+] Service '$ServiceName' is running." -ForegroundColor Green
+} else {
+    Write-Host "[!] Service status: $($svc.Status). Check Event Viewer for details." -ForegroundColor Yellow
+}
+
+# Check agent process
+$proc = Get-Process -Name "agent" -ErrorAction SilentlyContinue
+if ($proc) {
+    Write-Host "[+] Agent process running (PID $($proc.Id))." -ForegroundColor Green
+} else {
+    Write-Host "[!] Agent process not found. Check $InstallDir\queue.db for enrollment status." -ForegroundColor Yellow
+}
+
+Write-Host "[+] Installation complete." -ForegroundColor Green
+Write-Host "    Service : $ServiceName"
+Write-Host "    Binary  : $InstallDir\$AgentExe"
+Write-Host "    Backend : $BackendUrl"
+Write-Host "    Logs    : Event Viewer -> Windows Logs -> Application (source: $EventSource)"
