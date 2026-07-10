@@ -2,7 +2,7 @@ package notifier
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/smtp"
 	"strings"
 	"time"
@@ -30,9 +30,16 @@ func SendAlert(cfg SMTPConfig, subject, body string) {
 	for retry := 0; retry < 2; retry++ {
 		err := smtp.SendMail(addr, auth, cfg.From, cfg.Recipients, []byte(msg))
 		if err == nil {
+			slog.Debug("email sent",
+				slog.String("subject", subject),
+				slog.String("to", strings.Join(cfg.Recipients, ",")))
 			return
 		}
-		log.Printf("email: send failed (attempt %d): %v", retry+1, err)
+		slog.Error("email send failed",
+			slog.Int("attempt", retry+1),
+			slog.String("subject", subject),
+			slog.String("to", strings.Join(cfg.Recipients, ",")),
+			slog.String("error", err.Error()))
 		time.Sleep(2 * time.Second)
 	}
 }

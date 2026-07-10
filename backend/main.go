@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
 
+	"rmm/backend/logging"
 	"rmm/backend/notifier"
 )
 
@@ -388,7 +390,9 @@ func pruneLoginAttempts() {
 	for {
 		time.Sleep(1 * time.Hour)
 		if _, err := db.Exec(`DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '24 hours'`); err != nil {
-			log.Printf("Login attempt pruning error: %v", err)
+			slog.Error("login attempt pruning error",
+			slog.String("component", "auth"),
+			slog.String("error", err.Error()))
 		}
 	}
 }
@@ -432,7 +436,7 @@ func initDB() {
 	runMigrations()
 	seedAdminUser()
 
-	log.Println("Database initialized successfully")
+	slog.Info("database initialized successfully")
 }
 
 func runMigrations() {
@@ -781,7 +785,8 @@ func seedAdminUser() {
 		log.Fatalf("Failed to seed admin user: %v", err)
 	}
 
-	log.Printf("Default tenant and admin user seeded (%s)", cfg.AdminEmail)
+	slog.Info("default tenant and admin user seeded",
+		slog.String("email", cfg.AdminEmail))
 }
 
 // ─── JWT ──────────────────────────────────────────────────────────────────────
@@ -822,6 +827,13 @@ func parseToken(tokenStr string) (*Claims, error) {
 }
 
 // ─── Middleware ────────────────────────────────────────────────────────────────
+
+func requestIDMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := logging.NewContextWithRequestID(r.Context())
+		next(w, r.WithContext(ctx))
+	}
+}
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -992,7 +1004,10 @@ func upsertAgent(tenantID, agentID string) {
 		`, agentID, tenantID, now)
 		return err
 	}); err != nil {
-		log.Printf("upsertAgent error: %v", err)
+		slog.Error("upsertAgent error",
+			slog.String("agent_id", agentID),
+			slog.String("tenant_id", tenantID),
+			slog.String("error", err.Error()))
 	}
 	seedBackupJob(tenantID, agentID)
 }
@@ -1004,14 +1019,19 @@ func markAgentOffline(agentID string) {
 	// is a single lookup of an internal ID, not user-facing.
 	var tenantID, hostname string
 	if err := dbAdmin.QueryRow(`SELECT tenant_id, COALESCE(hostname,'') FROM agents WHERE id = $1`, agentID).Scan(&tenantID, &hostname); err != nil {
-		log.Printf("markAgentOffline: cannot find tenant for agent %s: %v", agentID, err)
+		slog.Warn("markAgentOffline: cannot find tenant for agent",
+			slog.String("agent_id", agentID),
+			slog.String("error", err.Error()))
 		return
 	}
 	if err := WithTenantWrite(tenantID, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`UPDATE agents SET status='offline', last_seen=$1 WHERE id=$2`, now, agentID)
 		return err
 	}); err != nil {
-		log.Printf("markAgentOffline error: %v", err)
+		slog.Error("markAgentOffline error",
+			slog.String("agent_id", agentID),
+			slog.String("tenant_id", tenantID),
+			slog.String("error", err.Error()))
 	}
 
 	// Dedup: skip notification if already alerted offline in last 30 min
@@ -1174,14 +1194,17 @@ func tryNotify(subject, body string) {
 	if cfg.SMTPHost == "" || len(cfg.AlertToEmails) == 0 {
 		return
 	}
-	go notifier.SendAlert(notifier.SMTPConfig{
-		Host:       cfg.SMTPHost,
-		Port:       cfg.SMTPPort,
-		User:       cfg.SMTPUser,
-		Password:   cfg.SMTPPassword,
-		From:       cfg.SMTPFrom,
-		Recipients: cfg.AlertToEmails,
-	}, subject, body)
+	go func() {
+		slog.Debug("sending alert email", slog.String("subject", subject))
+		notifier.SendAlert(notifier.SMTPConfig{
+			Host:       cfg.SMTPHost,
+			Port:       cfg.SMTPPort,
+			User:       cfg.SMTPUser,
+			Password:   cfg.SMTPPassword,
+			From:       cfg.SMTPFrom,
+			Recipients: cfg.AlertToEmails,
+		}, subject, body)
+	}()
 }
 
 func saveAlert(tenantID, agentID, severity, message, fingerprint string) int64 {
@@ -1193,7 +1216,12 @@ func saveAlert(tenantID, agentID, severity, message, fingerprint string) int64 {
 			VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
 		`, tenantID, agentID, severity, message, fingerprint, now).Scan(&id)
 	}); err != nil {
-		log.Printf("saveAlert error: %v", err)
+		slog.Error("saveAlert error",
+			slog.String("tenant_id", tenantID),
+			slog.String("agent_id", agentID),
+			slog.String("severity", severity),
+			slog.String("fingerprint", fingerprint),
+			slog.String("error", err.Error()))
 		return 0
 	}
 	broadcastEvent(severity, message, agentID)
@@ -1227,7 +1255,10 @@ func parseNextCronRun(cronExpr string) *time.Time {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	schedule, err := parser.Parse(cronExpr)
 	if err != nil {
-		log.Printf("backup-scheduler: invalid cron expression '%s': %v", cronExpr, err)
+		slog.Warn("backup-scheduler: invalid cron expression",
+			slog.String("component", "backup"),
+			slog.String("cron", cronExpr),
+			slog.String("error", err.Error()))
 		return nil
 	}
 	next := schedule.Next(time.Now().UTC())
@@ -1235,7 +1266,9 @@ func parseNextCronRun(cronExpr string) *time.Time {
 }
 
 func startBackupScheduler() {
-	log.Printf("backup-scheduler: starting (check interval: 60s)")
+	slog.Info("backup-scheduler: starting",
+		slog.String("component", "backup"),
+		slog.Int("check_interval_sec", 60))
 
 	// Set initial next_run_time for jobs that don't have one.
 	// INTENTIONAL: runs across ALL tenants (dbAdmin bypasses RLS).
@@ -1246,7 +1279,9 @@ func startBackupScheduler() {
 		WHERE next_run_time IS NULL AND status != 'running'
 	`)
 	if err != nil {
-		log.Printf("backup-scheduler: failed to initialize next_run_time: %v", err)
+		slog.Error("backup-scheduler: failed to initialize next_run_time",
+			slog.String("component", "backup"),
+			slog.String("error", err.Error()))
 	}
 
 	ticker := time.NewTicker(60 * time.Second)
@@ -1268,7 +1303,9 @@ func executePendingBackupJobs() {
 		LIMIT 10
 	`)
 	if err != nil {
-		log.Printf("backup-scheduler: query failed: %v", err)
+		slog.Error("backup-scheduler: query failed",
+			slog.String("component", "backup"),
+			slog.String("error", err.Error()))
 		return
 	}
 	defer rows.Close()
@@ -1289,7 +1326,11 @@ func executePendingBackupJobs() {
 
 func executeBackupJobAsync(jobID int64, tenantID, agentID, name, location, typ, cronExpr string) {
 	agentID = normalizeAgentID(agentID)
-	log.Printf("backup-scheduler: executing job %d (%s) on agent %s", jobID, name, agentID)
+	slog.Info("backup-scheduler: executing job",
+		slog.String("component", "backup"),
+		slog.Int64("job_id", jobID),
+		slog.String("name", name),
+		slog.String("agent_id", agentID))
 
 	// Calculate next run time BEFORE executing
 	nextRun := parseNextCronRun(cronExpr)
@@ -1303,7 +1344,10 @@ func executeBackupJobAsync(jobID int64, tenantID, agentID, name, location, typ, 
 	agentsMu.Unlock()
 
 	if !ok {
-		log.Printf("backup-scheduler: agent %s not connected, marking job %d as pending", agentID, jobID)
+		slog.Warn("backup-scheduler: agent not connected, marking job as pending",
+			slog.String("component", "backup"),
+			slog.Int64("job_id", jobID),
+			slog.String("agent_id", agentID))
 		dbAdmin.Exec(`UPDATE backup_jobs SET status = 'pending' WHERE id = $1`, jobID)
 		return
 	}
@@ -1352,7 +1396,11 @@ func executeBackupJobAsync(jobID int64, tenantID, agentID, name, location, typ, 
 	agent.Mu.Unlock()
 
 	if err != nil {
-		log.Printf("backup-scheduler: failed to send backup command to agent %s: %v", agentID, err)
+		slog.Error("backup-scheduler: failed to send backup command",
+			slog.String("component", "backup"),
+			slog.Int64("job_id", jobID),
+			slog.String("agent_id", agentID),
+			slog.String("error", err.Error()))
 		dbAdmin.Exec(`UPDATE backup_jobs SET status = 'failed' WHERE id = $1`, jobID)
 		return
 	}
@@ -1368,7 +1416,9 @@ func executeBackupJobAsync(jobID int64, tenantID, agentID, name, location, typ, 
 }
 
 func handleBackupStatusMessage(payload string) {
-	log.Printf("backup-scheduler: progress message: %s", payload)
+	slog.Info("backup-scheduler: progress message",
+		slog.String("component", "backup"),
+		slog.String("payload", payload))
 }
 
 func handleBackupResultMessage(tenantID, agentID, payload string) {
@@ -1381,17 +1431,21 @@ func handleBackupResultMessage(tenantID, agentID, payload string) {
 	}
 
 	if err := json.Unmarshal([]byte(payload), &result); err != nil {
-		log.Printf("backup-scheduler: invalid backup_result payload: %v", err)
+		slog.Error("backup-scheduler: invalid backup_result payload",
+			slog.String("component", "backup"),
+			slog.String("error", err.Error()))
 		return
 	}
 
+	bkLog := slog.With(slog.String("component", "backup"), slog.Int64("job_id", result.JobID))
 	if err := WithTenantWrite(tenantID, func(tx *sql.Tx) error {
 		if result.Status == "completed" {
 			_, err := tx.Exec(`
 				UPDATE backup_jobs SET status = 'completed', size_bytes = $1 WHERE id = $2
 			`, result.SizeBytes, result.JobID)
 			if err == nil {
-				log.Printf("backup-scheduler: job %d completed (size: %d bytes)", result.JobID, result.SizeBytes)
+				bkLog.Info("backup-scheduler: job completed",
+					slog.Int64("size_bytes", result.SizeBytes))
 			}
 			return err
 		}
@@ -1399,11 +1453,13 @@ func handleBackupResultMessage(tenantID, agentID, payload string) {
 			UPDATE backup_jobs SET status = 'failed' WHERE id = $1
 		`, result.JobID)
 		if err == nil {
-			log.Printf("backup-scheduler: job %d failed: %s", result.JobID, result.Error)
+			bkLog.Warn("backup-scheduler: job failed",
+				slog.String("error_msg", result.Error))
 		}
 		return err
 	}); err != nil {
-		log.Printf("backup-scheduler: failed to update job %d: %v", result.JobID, err)
+		bkLog.Error("backup-scheduler: failed to update job",
+			slog.String("error", err.Error()))
 		return
 	}
 
@@ -3081,13 +3137,26 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 
 	agentID := claims.UserID
 	tenantID := claims.TenantID
+	connID := logging.NewRequestID()
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade agent connection: %v", err)
+		slog.Error("failed to upgrade agent connection",
+			slog.String("connection_id", connID),
+			slog.String("agent_id", agentID),
+			slog.String("tenant_id", tenantID),
+			slog.String("component", "ws-agent"),
+			slog.String("error", err.Error()))
 		return
 	}
 	defer conn.Close()
+
+	logAttrs := []any{
+		slog.String("connection_id", connID),
+		slog.String("agent_id", agentID),
+		slog.String("tenant_id", tenantID),
+		slog.String("component", "ws-agent"),
+	}
 
 	agentConn := &AgentConnection{ID: agentID, TenantID: tenantID, Conn: conn}
 	agentsMu.Lock()
@@ -3095,26 +3164,26 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 	agentsMu.Unlock()
 
 	upsertAgent(tenantID, agentID)
-	log.Printf("Agent connected: %s (tenant: %s)", agentID, tenantID)
+	slog.Info("agent connected", logAttrs...)
 
 	defer func() {
 		agentsMu.Lock()
 		delete(agents, normalizeAgentID(agentID))
 		agentsMu.Unlock()
 		markAgentOffline(agentID)
-		log.Printf("Agent disconnected: %s", agentID)
+		slog.Info("agent disconnected", logAttrs...)
 	}()
 
 	for {
 		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("Agent %s read error: %v", agentID, err)
+			slog.Warn("agent read error", append(logAttrs, slog.String("error", err.Error()))...)
 			break
 		}
 
 		var msg Message
 		if err := json.Unmarshal(msgBytes, &msg); err != nil {
-			log.Printf("Failed to parse agent message: %v", err)
+			slog.Warn("failed to parse agent message", append(logAttrs, slog.String("error", err.Error()))...)
 			continue
 		}
 
@@ -3122,7 +3191,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 		case "telemetry":
 			var t TelemetryPayload
 			if err := json.Unmarshal([]byte(msg.Payload), &t); err != nil {
-				log.Printf("Failed to parse telemetry payload: %v", err)
+				slog.Warn("failed to parse telemetry payload", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 			saveTelemetry(agentID, tenantID, t)
@@ -3135,7 +3204,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 			}
 			var history []HistoricalPayload
 			if err := json.Unmarshal([]byte(msg.Payload), &history); err != nil {
-				log.Printf("Failed to parse telemetry_history: %v", err)
+				slog.Warn("failed to parse telemetry_history", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 			// telemetry has no tenant_id column; its RLS policy uses a
@@ -3157,7 +3226,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			}); err != nil {
-				log.Printf("telemetry_history write error: %v", err)
+				slog.Error("telemetry_history write error", append(logAttrs, slog.String("error", err.Error()))...)
 			}
 			broadcastToFrontend(agentID, msgBytes)
 
@@ -3182,17 +3251,19 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "backup_status":
-			log.Printf("Backup progress from agent %s: %s", agentID, msg.Payload)
+			slog.Info("backup progress", append(logAttrs,
+				slog.String("msg_type", "backup_status"),
+				slog.String("payload", msg.Payload))...)
 			handleBackupStatusMessage(msg.Payload)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "backup_result":
-			log.Printf("Backup result from agent %s", agentID)
+			slog.Info("backup result", append(logAttrs, slog.String("msg_type", "backup_result"))...)
 			handleBackupResultMessage(tenantID, agentID, msg.Payload)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "snapshot_list":
-			log.Printf("Snapshot list from agent %s", agentID)
+			slog.Info("snapshot list", append(logAttrs, slog.String("msg_type", "snapshot_list"))...)
 			snapshotRequestsMu.Lock()
 			if ch, ok := snapshotRequests[normalizeAgentID(agentID)]; ok {
 				ch <- msg.Payload
@@ -3202,18 +3273,20 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "restore_status":
-			log.Printf("Restore progress from agent %s: %s", agentID, msg.Payload)
+			slog.Info("restore progress", append(logAttrs,
+				slog.String("msg_type", "restore_status"),
+				slog.String("payload", msg.Payload))...)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "restore_result":
-			log.Printf("Restore result from agent %s", agentID)
+			slog.Info("restore result", append(logAttrs, slog.String("msg_type", "restore_result"))...)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "screen_frame":
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "software_list":
-			log.Printf("Software list received from agent %s", agentID)
+			slog.Info("software list received", append(logAttrs, slog.String("msg_type", "software_list"))...)
 			var softwareItems []struct {
 				Name                 string `json:"name"`
 				Publisher            string `json:"publisher"`
@@ -3223,7 +3296,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				QuietUninstallString string `json:"quietUninstallString"`
 			}
 			if err := json.Unmarshal([]byte(msg.Payload), &softwareItems); err != nil {
-				log.Printf("Failed to parse software_list: %v", err)
+				slog.Warn("failed to parse software_list", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 
@@ -3251,7 +3324,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			}); err != nil {
-				log.Printf("software_list write error: %v", err)
+				slog.Error("software_list write error", append(logAttrs, slog.String("error", err.Error()))...)
 			}
 			broadcastToFrontend(agentID, msgBytes)
 
@@ -3262,7 +3335,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				Message string `json:"message"`
 			}
 			if err := json.Unmarshal([]byte(msg.Payload), &logEntry); err != nil {
-				log.Printf("Failed to parse agent_log: %v", err)
+				slog.Warn("failed to parse agent_log", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 
@@ -3274,11 +3347,11 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				`, tenantID, agentID, logEntry.Level, logEntry.LogType, logEntry.Message)
 				return err
 			}); err != nil {
-				log.Printf("agent_log write error: %v", err)
+				slog.Error("agent_log write error", append(logAttrs, slog.String("error", err.Error()))...)
 			}
 
 		case "patch_list":
-			log.Printf("Patch list received from agent %s", agentID)
+			slog.Info("patch list received", append(logAttrs, slog.String("msg_type", "patch_list"))...)
 			var patchItems []struct {
 				KbID        string `json:"kbId"`
 				Name        string `json:"name"`
@@ -3288,7 +3361,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				InstalledAt string `json:"installedAt"`
 			}
 			if err := json.Unmarshal([]byte(msg.Payload), &patchItems); err != nil {
-				log.Printf("Failed to parse patch_list: %v", err)
+				slog.Warn("failed to parse patch_list", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 
@@ -3309,7 +3382,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				}
 				return nil
 			}); err != nil {
-				log.Printf("patch_list write error: %v", err)
+				slog.Error("patch_list write error", append(logAttrs, slog.String("error", err.Error()))...)
 			}
 			broadcastToFrontend(agentID, msgBytes)
 
@@ -3320,7 +3393,7 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 				Output  string `json:"output"`
 			}
 			if err := json.Unmarshal([]byte(msg.Payload), &result); err != nil {
-				log.Printf("Failed to parse check_result: %v", err)
+				slog.Warn("failed to parse check_result", append(logAttrs, slog.String("error", err.Error()))...)
 				continue
 			}
 
@@ -3334,11 +3407,13 @@ func handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "software_uninstall_result":
-			log.Printf("Software uninstall result from agent %s: %s", agentID, msg.Payload)
+			slog.Info("software uninstall result", append(logAttrs,
+				slog.String("msg_type", "software_uninstall_result"),
+				slog.String("payload", msg.Payload))...)
 			broadcastToFrontend(agentID, msgBytes)
 
 		case "script_result":
-			log.Printf("Script result from agent %s", agentID)
+			slog.Info("script result", append(logAttrs, slog.String("msg_type", "script_result"))...)
 			handleScriptResultMessage(tenantID, agentID, msg.Payload)
 			broadcastToFrontend(agentID, msgBytes)
 		}
@@ -5122,12 +5197,15 @@ func pruneOldTelemetry() {
 		for range ticker.C {
 			result, err := dbAdmin.Exec(`DELETE FROM telemetry WHERE recorded_at < NOW() - INTERVAL '30 days'`)
 			if err != nil {
-				log.Printf("Telemetry pruning error: %v", err)
+				slog.Error("telemetry pruning error",
+					slog.String("component", "telemetry"),
+					slog.String("error", err.Error()))
 				continue
 			}
-			rows, _ := result.RowsAffected()
-			if rows > 0 {
-				log.Printf("Pruned %d old telemetry rows", rows)
+			if rows, e := result.RowsAffected(); e == nil && rows > 0 {
+				slog.Info("pruned old telemetry rows",
+					slog.String("component", "telemetry"),
+					slog.Int64("rows", rows))
 			}
 		}
 	}()
@@ -5137,6 +5215,7 @@ func pruneOldTelemetry() {
 
 func main() {
 	cfg = loadConfig()
+	logging.Init(cfg.LogLevel)
 	initBackupEncryption()
 	initDB()
 	pruneOldTelemetry()
@@ -5144,44 +5223,45 @@ func main() {
 	go startBackupScheduler()
 
 	// Public routes
-	http.HandleFunc("/health", handleHealth)
-	http.HandleFunc("/api/auth/login", corsMiddleware(handleLogin))
+	http.HandleFunc("/health", requestIDMiddleware(handleHealth))
+	http.HandleFunc("/api/auth/login", requestIDMiddleware(corsMiddleware(handleLogin)))
 
 	// Enrollment (agent registration)
-	http.HandleFunc("/api/enroll", corsMiddleware(handleEnrollAgent))
-	http.HandleFunc("/api/agents/register-token", corsMiddleware(authMiddleware(handleCreateRegistrationToken)))
+	http.HandleFunc("/api/enroll", requestIDMiddleware(corsMiddleware(handleEnrollAgent)))
+	http.HandleFunc("/api/agents/register-token", requestIDMiddleware(corsMiddleware(authMiddleware(handleCreateRegistrationToken))))
 
 	// Agent WebSocket (agent authenticates with its own JWT)
 	http.HandleFunc("/agent/connect", handleAgentConnection)
 
 	// Protected routes
-	http.HandleFunc("/api/agents", corsMiddleware(authMiddleware(handleListAgents)))
-	http.HandleFunc("/api/agents/detail", corsMiddleware(authMiddleware(handleGetAgent)))
-	http.HandleFunc("/api/agents/telemetry", corsMiddleware(authMiddleware(handleAgentTelemetry)))
-	http.HandleFunc("/api/agents/", corsMiddleware(authMiddleware(handleAgentRoutes)))
-	http.HandleFunc("/api/notes/", corsMiddleware(authMiddleware(handleNoteRoutes)))
-	http.HandleFunc("/api/checks/", corsMiddleware(authMiddleware(handleCheckRoutes)))
-	http.HandleFunc("/api/alerts", corsMiddleware(authMiddleware(handleListAlerts)))
-	http.HandleFunc("/api/alerts/detail", corsMiddleware(authMiddleware(handleGetAlert)))
-	http.HandleFunc("/api/alerts/acknowledge", corsMiddleware(authMiddleware(handleAcknowledgeAlert)))
-	http.HandleFunc("/api/backups", corsMiddleware(authMiddleware(handleListBackups)))
-	http.HandleFunc("/api/backups/run", corsMiddleware(authMiddleware(handleRunBackup)))
-	http.HandleFunc("/api/backup-jobs/", corsMiddleware(authMiddleware(handleDeleteBackupJob)))
-	http.HandleFunc("/api/users", corsMiddleware(authMiddleware(handleUsers)))
-	http.HandleFunc("/api/users/", corsMiddleware(authMiddleware(handleUserRoutes)))
-	http.HandleFunc("/api/tenants", corsMiddleware(authMiddleware(handleListTenants)))
-	http.HandleFunc("/api/audit", corsMiddleware(authMiddleware(handleListGlobalAudit)))
-	http.HandleFunc("/api/scripts", corsMiddleware(authMiddleware(handleScripts)))
-	http.HandleFunc("/api/scripts/", corsMiddleware(authMiddleware(handleScriptRoutes)))
-	http.HandleFunc("/api/script-executions", corsMiddleware(authMiddleware(handleListScriptExecutions)))
+	http.HandleFunc("/api/agents", requestIDMiddleware(corsMiddleware(authMiddleware(handleListAgents))))
+	http.HandleFunc("/api/agents/detail", requestIDMiddleware(corsMiddleware(authMiddleware(handleGetAgent))))
+	http.HandleFunc("/api/agents/telemetry", requestIDMiddleware(corsMiddleware(authMiddleware(handleAgentTelemetry))))
+	http.HandleFunc("/api/agents/", requestIDMiddleware(corsMiddleware(authMiddleware(handleAgentRoutes))))
+	http.HandleFunc("/api/notes/", requestIDMiddleware(corsMiddleware(authMiddleware(handleNoteRoutes))))
+	http.HandleFunc("/api/checks/", requestIDMiddleware(corsMiddleware(authMiddleware(handleCheckRoutes))))
+	http.HandleFunc("/api/alerts", requestIDMiddleware(corsMiddleware(authMiddleware(handleListAlerts))))
+	http.HandleFunc("/api/alerts/detail", requestIDMiddleware(corsMiddleware(authMiddleware(handleGetAlert))))
+	http.HandleFunc("/api/alerts/acknowledge", requestIDMiddleware(corsMiddleware(authMiddleware(handleAcknowledgeAlert))))
+	http.HandleFunc("/api/backups", requestIDMiddleware(corsMiddleware(authMiddleware(handleListBackups))))
+	http.HandleFunc("/api/backups/run", requestIDMiddleware(corsMiddleware(authMiddleware(handleRunBackup))))
+	http.HandleFunc("/api/backup-jobs/", requestIDMiddleware(corsMiddleware(authMiddleware(handleDeleteBackupJob))))
+	http.HandleFunc("/api/users", requestIDMiddleware(corsMiddleware(authMiddleware(handleUsers))))
+	http.HandleFunc("/api/users/", requestIDMiddleware(corsMiddleware(authMiddleware(handleUserRoutes))))
+	http.HandleFunc("/api/tenants", requestIDMiddleware(corsMiddleware(authMiddleware(handleListTenants))))
+	http.HandleFunc("/api/audit", requestIDMiddleware(corsMiddleware(authMiddleware(handleListGlobalAudit))))
+	http.HandleFunc("/api/scripts", requestIDMiddleware(corsMiddleware(authMiddleware(handleScripts))))
+	http.HandleFunc("/api/scripts/", requestIDMiddleware(corsMiddleware(authMiddleware(handleScriptRoutes))))
+	http.HandleFunc("/api/script-executions", requestIDMiddleware(corsMiddleware(authMiddleware(handleListScriptExecutions))))
 
 	// WebSocket routes
-	http.HandleFunc("/terminal/ws", corsMiddleware(authMiddleware(handleTerminalWebSocket)))
-	http.HandleFunc("/screen/ws", corsMiddleware(authMiddleware(handleScreenWebSocket)))
-	http.HandleFunc("/api/events/ws", authMiddleware(handleEventsWebSocket))
+	http.HandleFunc("/terminal/ws", requestIDMiddleware(corsMiddleware(authMiddleware(handleTerminalWebSocket))))
+	http.HandleFunc("/screen/ws", requestIDMiddleware(corsMiddleware(authMiddleware(handleScreenWebSocket))))
+	http.HandleFunc("/api/events/ws", requestIDMiddleware(authMiddleware(handleEventsWebSocket)))
 
-	log.Printf("Backend starting on http://localhost%s", cfg.Port)
+	slog.Info("backend starting", slog.String("port", cfg.Port))
 	if err := http.ListenAndServe(cfg.Port, nil); err != nil {
-		log.Fatalf("Failed to start backend: %v", err)
+		slog.Error("failed to start backend", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
