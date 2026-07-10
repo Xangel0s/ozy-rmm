@@ -134,7 +134,10 @@ type SoftwareItem struct {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 var agentID = "windows-client-dev"
-var backendAddr = "127.0.0.1:8080"
+var (
+	backendAddr   = "127.0.0.1:8080"
+	backendUseTLS bool
+)
 var agentVersion = "1.2.0"
 var agentJWT = ""
 
@@ -265,7 +268,11 @@ func enrollWithToken(enrollToken string) error {
 		return fmt.Errorf("failed to marshal enroll payload: %w", err)
 	}
 
-	enrollURL := "http://" + backendAddr + "/api/enroll"
+	enrollScheme := "http"
+	if backendUseTLS {
+		enrollScheme = "https"
+	}
+	enrollURL := enrollScheme + "://" + backendAddr + "/api/enroll"
 	req, err := http.NewRequest(http.MethodPost, enrollURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to build enroll request: %w", err)
@@ -413,7 +420,13 @@ func initEventLog() {
 
 func main() {
 	if envBackend := os.Getenv("BACKEND_URL"); envBackend != "" {
-		backendAddr = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(envBackend, "https://"), "http://"))
+		envBackend = strings.TrimSpace(envBackend)
+		if strings.HasPrefix(envBackend, "https://") {
+			backendUseTLS = true
+			backendAddr = strings.TrimPrefix(envBackend, "https://")
+		} else {
+			backendAddr = strings.TrimPrefix(envBackend, "http://")
+		}
 	}
 	if envVersion := os.Getenv("AGENT_VERSION"); envVersion != "" {
 		agentVersion = envVersion
@@ -470,8 +483,12 @@ func runAgentLoop(shutdownChan chan struct{}) {
 		default:
 		}
 
-		u := url.URL{Scheme: "ws", Host: backendAddr, Path: "/agent/connect", RawQuery: "token=" + agentJWT}
-		log.Printf("Connecting to %s/agent/connect (agent_id=%s)", "ws://"+backendAddr, agentID)
+		wsScheme := "ws"
+		if backendUseTLS {
+			wsScheme = "wss"
+		}
+		u := url.URL{Scheme: wsScheme, Host: backendAddr, Path: "/agent/connect", RawQuery: "token=" + agentJWT}
+		log.Printf("Connecting to %s/agent/connect (agent_id=%s)", wsScheme+"://"+backendAddr, agentID)
 
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {

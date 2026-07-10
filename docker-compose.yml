@@ -46,7 +46,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL:-http://localhost:8080}
+      - NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL:-https://api.merckout.name}
     depends_on:
       - backend
 

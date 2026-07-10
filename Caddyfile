@@ -1,7 +1,12 @@
-api.merckout.name {
-    reverse_proxy backend:8080
-}
-
+# ─── Frontend ───────────────────────────────────────────────────────────────
 merckout.name {
     reverse_proxy frontend:3000
+}
+
+# ─── API + WebSocket ────────────────────────────────────────────────────────
+api.merckout.name {
+    reverse_proxy backend:8080 {
+        # WebSocket needs flush interval to stream frames in real time
+        flush_interval -1
+    }
 }
