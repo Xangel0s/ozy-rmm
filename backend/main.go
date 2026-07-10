@@ -24,6 +24,8 @@ import (
 	pq "github.com/lib/pq"
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
+
+	"rmm/backend/notifier"
 )
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -38,6 +40,12 @@ type Config struct {
 	AgentEnrollSecret string
 	LogLevel         string
 	Port             string
+	SMTPHost         string
+	SMTPPort         string
+	SMTPUser         string
+	SMTPPassword     string
+	SMTPFrom         string
+	AlertToEmails    []string
 }
 
 func loadConfig() Config {
@@ -81,6 +89,16 @@ func loadConfig() Config {
 		log.Fatal("AGENT_ENROLL_SECRET environment variable is required")
 	}
 
+	smtpTo := []string{}
+	if to := os.Getenv("ALERT_TO_EMAILS"); to != "" {
+		for _, addr := range strings.Split(to, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				smtpTo = append(smtpTo, addr)
+			}
+		}
+	}
+
 	return Config{
 		JWTSecret:         []byte(jwtSecret),
 		CORSOrigins:       corsOrigins,
@@ -91,6 +109,12 @@ func loadConfig() Config {
 		AgentEnrollSecret: enrollSecret,
 		LogLevel:          os.Getenv("LOG_LEVEL"),
 		Port:              ":8080",
+		SMTPHost:          os.Getenv("SMTP_HOST"),
+		SMTPPort:          os.Getenv("SMTP_PORT"),
+		SMTPUser:          os.Getenv("SMTP_USER"),
+		SMTPPassword:      os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:          os.Getenv("SMTP_FROM"),
+		AlertToEmails:     smtpTo,
 	}
 }
 
@@ -698,6 +722,9 @@ func runMigrations() {
 	);
 	CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(identifier, type, attempted_at);
 
+	ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
+	CREATE INDEX IF NOT EXISTS idx_alerts_notified ON alerts(notified_at) WHERE notified_at IS NOT NULL;
+
 	GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE scripts, script_executions, terminal_sessions, agent_backup_configs, login_attempts TO apexrmm_app;
 	GRANT USAGE, SELECT ON SEQUENCE scripts_id_seq, script_executions_id_seq, terminal_sessions_id_seq, agent_backup_configs_id_seq, login_attempts_id_seq TO apexrmm_app;
 
@@ -975,8 +1002,8 @@ func markAgentOffline(agentID string) {
 	// markAgentOffline needs the agent's tenant_id to scope the UPDATE
 	// under RLS. Look it up via the admin pool (BYPASSRLS) — this
 	// is a single lookup of an internal ID, not user-facing.
-	var tenantID string
-	if err := dbAdmin.QueryRow(`SELECT tenant_id FROM agents WHERE id = $1`, agentID).Scan(&tenantID); err != nil {
+	var tenantID, hostname string
+	if err := dbAdmin.QueryRow(`SELECT tenant_id, COALESCE(hostname,'') FROM agents WHERE id = $1`, agentID).Scan(&tenantID, &hostname); err != nil {
 		log.Printf("markAgentOffline: cannot find tenant for agent %s: %v", agentID, err)
 		return
 	}
@@ -986,6 +1013,24 @@ func markAgentOffline(agentID string) {
 	}); err != nil {
 		log.Printf("markAgentOffline error: %v", err)
 	}
+
+	// Dedup: skip notification if already alerted offline in last 30 min
+	fingerprint := fmt.Sprintf("offline-%s", agentID)
+	var recentCount int
+	_ = WithTenantRead(tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRow(`
+			SELECT COUNT(*) FROM alerts
+			WHERE fingerprint = $1 AND created_at > NOW() - INTERVAL '30 minutes'
+		`, fingerprint).Scan(&recentCount)
+	})
+	if recentCount > 0 {
+		return
+	}
+
+	saveAlert(tenantID, agentID, "critical",
+		fmt.Sprintf("Agent offline: %s (%s)", hostname, agentID), fingerprint)
+	tryNotify("Agent Offline",
+		fmt.Sprintf("Alert: Agent %s is offline.", hostname))
 }
 
 func saveTelemetry(agentID, tenantID string, t TelemetryPayload) {
@@ -1050,6 +1095,8 @@ func saveTelemetry(agentID, tenantID string, t TelemetryPayload) {
 			if recentCount == 0 {
 				saveAlert(tenantID, agentID, "warning",
 					fmt.Sprintf("CPU usage critical: %.0f%% on %s", t.CPULoad, t.Hostname), fingerprint)
+				tryNotify("CPU Alert",
+					fmt.Sprintf("Alert: CPU usage critical at %.0f%% on %s", t.CPULoad, t.Hostname))
 			}
 		}
 	}
@@ -1077,11 +1124,13 @@ func saveTelemetry(agentID, tenantID string, t TelemetryPayload) {
 						WHERE fingerprint = $1 AND created_at > NOW() - INTERVAL '10 minutes'
 					`, fingerprint).Scan(&recentCount)
 				})
-				if recentCount == 0 {
-					freeGB := float64(t.FreeRAM) / 1048576
-					saveAlert(tenantID, agentID, "warning",
-						fmt.Sprintf("RAM usage critical: %.0f%% free (%.1f GB) on %s", ramFreePercent, freeGB, t.Hostname), fingerprint)
-				}
+			if recentCount == 0 {
+				freeGB := float64(t.FreeRAM) / 1048576
+				saveAlert(tenantID, agentID, "warning",
+					fmt.Sprintf("RAM usage critical: %.0f%% free (%.1f GB) on %s", ramFreePercent, freeGB, t.Hostname), fingerprint)
+				tryNotify("RAM Alert",
+					fmt.Sprintf("Alert: RAM usage critical — %.0f%% free (%.1f GB) on %s", ramFreePercent, freeGB, t.Hostname))
+			}
 			}
 		}
 	}
@@ -1109,17 +1158,33 @@ func saveTelemetry(agentID, tenantID string, t TelemetryPayload) {
 						WHERE fingerprint = $1 AND created_at > NOW() - INTERVAL '10 minutes'
 					`, fingerprint).Scan(&recentCount)
 				})
-				if recentCount == 0 {
-					freeGB := float64(t.DiskFree) / 1073741824
-					saveAlert(tenantID, agentID, "warning",
-						fmt.Sprintf("Disk usage critical: %.0f%% free (%.1f GB) on %s", diskFreePercent, freeGB, t.Hostname), fingerprint)
-				}
+			if recentCount == 0 {
+				freeGB := float64(t.DiskFree) / 1073741824
+				saveAlert(tenantID, agentID, "warning",
+					fmt.Sprintf("Disk usage critical: %.0f%% free (%.1f GB) on %s", diskFreePercent, freeGB, t.Hostname), fingerprint)
+				tryNotify("Disk Alert",
+					fmt.Sprintf("Alert: Disk usage critical — %.0f%% free (%.1f GB) on %s", diskFreePercent, freeGB, t.Hostname))
+			}
 			}
 		}
 	}
 }
 
-func saveAlert(tenantID, agentID, severity, message, fingerprint string) {
+func tryNotify(subject, body string) {
+	if cfg.SMTPHost == "" || len(cfg.AlertToEmails) == 0 {
+		return
+	}
+	go notifier.SendAlert(notifier.SMTPConfig{
+		Host:       cfg.SMTPHost,
+		Port:       cfg.SMTPPort,
+		User:       cfg.SMTPUser,
+		Password:   cfg.SMTPPassword,
+		From:       cfg.SMTPFrom,
+		Recipients: cfg.AlertToEmails,
+	}, subject, body)
+}
+
+func saveAlert(tenantID, agentID, severity, message, fingerprint string) int64 {
 	now := time.Now().UTC()
 	var id int64
 	if err := WithTenantWrite(tenantID, func(tx *sql.Tx) error {
@@ -1129,8 +1194,10 @@ func saveAlert(tenantID, agentID, severity, message, fingerprint string) {
 		`, tenantID, agentID, severity, message, fingerprint, now).Scan(&id)
 	}); err != nil {
 		log.Printf("saveAlert error: %v", err)
+		return 0
 	}
 	broadcastEvent(severity, message, agentID)
+	return id
 }
 
 func seedBackupJob(tenantID, agentID string) {
@@ -1337,6 +1404,15 @@ func handleBackupResultMessage(tenantID, agentID, payload string) {
 		return err
 	}); err != nil {
 		log.Printf("backup-scheduler: failed to update job %d: %v", result.JobID, err)
+		return
+	}
+
+	if result.Status != "completed" {
+		var hostname string
+		dbAdmin.QueryRow(`SELECT COALESCE(hostname,'') FROM agents WHERE id = $1`, agentID).Scan(&hostname)
+		msg := fmt.Sprintf("Backup failed on %s: %s", hostname, result.Error)
+		saveAlert(tenantID, agentID, "error", msg, fmt.Sprintf("backup-fail-%s-%d", agentID, result.JobID))
+		tryNotify("Backup Failure", msg)
 	}
 }
 
